@@ -101,9 +101,13 @@ by ordering on `sent_at`.
 | created_at / updated_at | timestamps | |
 
 `wa_webhook_events` — the full body of every callback we accepted, kept for debugging and replay.
-`id`, `received_at`, `entry_id`, `phone_number_id`, `changes_json`, `status` (`stored`,
-`duplicate`, `ignored`, `rejected_signature`). Written before parsing succeeds, so a payload that
-breaks the parser is still recoverable. Retention: 30 days, pruned by a scheduled command.
+`id`, `received_at`, `entry_id`, `phone_number_id`, `changes_json`, `body_hash` (sha256 of the exact
+raw request body, indexed but **not** unique), `signature_valid` (`valid` / `invalid` / `unchecked`),
+`status` (`stored`, `duplicate`, `ignored`, `rejected_signature`). Written before parsing succeeds,
+so a payload that breaks the parser is still recoverable. `body_hash` is what the dedupe check reads:
+a non-unique index, because Meta's retry of an identical callback is itself an accepted callback and
+earns its own audit row — a unique constraint would throw a database error inside the request we must
+answer with `200`. Retention: 30 days, pruned by a scheduled command.
 
 ## 6. Routes
 
@@ -163,9 +167,11 @@ here; this app has its own key.
 
 Both run in the queued job, after the inbound row is stored.
 
-- **Opt-out.** The trimmed, lowercased first line of an inbound text message is compared to a fixed
-  set: `stop`, `end`, `cancel`, `unsubscribe`, `opt out`, `optout`, `quit`, `remove`. On match (or
-  on Meta's own `interactive` button reply whose id is `STOP`): set `opted_out_at`,
+- **Opt-out.** The first line of an inbound text message is lowercased, stripped of surrounding
+  punctuation and split on whitespace; if *any* word in it belongs to the fixed set `stop`, `end`,
+  `cancel`, `unsubscribe`, `opt out`, `opt-out`, `optout`, `quit`, `remove` the message is an opt-out
+  (so "please STOP and email me" counts). A Meta `interactive` button reply whose id is `STOP` counts
+  too. Then: set `opted_out_at`,
   `opt_out_source = inbound_keyword`, and send one free-form confirmation — "You won't get any more
   messages from us on this number." Suppression is applied in the same job, before the send is
   attempted, so the gate is closed whether or not the confirmation reaches the handset. The

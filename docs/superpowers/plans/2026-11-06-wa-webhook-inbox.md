@@ -1674,7 +1674,7 @@ git commit -m "feat: single Graph write path that records every send attempt"
 **Deliverable:** STOP-family text or button sets `opted_out_at` before anything else happens, sends exactly one free-form confirmation, and never re-confirms for an already suppressed contact.
 
 **Consumes:** `WaMessage` rows from Task 5, `WhatsAppSender` from Task 6.
-**Produces:** `App\Support\OptOutKeywords::matches(?string $text, ?string $buttonId = null): bool`, `App\Services\AutoResponder::handle(WaMessage $in): void`.
+**Produces:** `App\Support\OptOutKeywords::matches(?string $text, ?string $buttonId = null): bool`, `App\Services\AutoResponder::handle(WaMessage $in, ?string $buttonId = null): void`.
 
 - [ ] **Step 1: Write the failing tests** — `tests/Unit/OptOutKeywordsTest.php`
 
@@ -1706,8 +1706,9 @@ class OptOutKeywordsTest extends TestCase
     public static function notKeywordProvider(): array
     {
         return [
-            ['ordering my stop sign'], ['what is a deadline'], ['started'],
-            ['renewal'], ['options'], [''], [null], ['   '], ['i want to stop paying taxes'],
+            ['what is a deadline'], ['started'], ['stopped'], ['stopwatch'], ['nonstop'],
+            ['ending'], ['removal'], ['cancellation'], ['renewal'], ['options'],
+            [''], [null], ['   '],
         ];
     }
 
@@ -1782,6 +1783,8 @@ php artisan test tests/Unit/OptOutKeywordsTest.php
 ```
 
 Expected: all data rows pass. Note the deliberate looseness: any single STOP-family word anywhere in the first line opts the contact out. A false opt-out costs one silenced client; a missed one costs a complaint against the account's quality rating.
+
+The negative rows test whole-word discipline (`stopped`, `stopwatch`, `nonstop` must not fire), not sentence intent. "i want to stop paying taxes" **does** suppress that contact, and that is intended: suppression blocks outbound sends only, the inbound message is still stored and still visible in the thread, so a human can read it and call them. A missed opt-out has no such recovery path.
 
 - [ ] **Step 5: Write the failing feature test** — `tests/Feature/OptOutFlowTest.php`
 
@@ -2641,7 +2644,7 @@ git commit -m "feat: bearer-guarded suppression list and bench send records"
 **Deliverable:** a signed-in user sees the contact list with opt-out and window state, and a thread that shows inbound on the left, outbound on the right, marks machine sends as automatic, and shows the failure reason for refused sends.
 
 **Consumes:** `WaContact::display_name()`, `windowOpen()`, `isOptedOut()`, `WaMessage` rows.
-**Produces:** `App\Http\Controllers\InboxController::contacts(Request)` and `::thread(WaContact)`; views `inbox/contacts.blade.php`, `inbox/thread.blade.php`; the `/inbox` closure from Task 9 replaced by the controller.
+**Produces:** `App\Http\Controllers\InboxController::contacts(Request)` and `::thread(WaContact)`; views `inbox/contacts.blade.php`, `inbox/thread.blade.php`; the first `/inbox` routes, added inside the `auth` group Task 9 created.
 
 - [ ] **Step 1: Write the failing test** — `tests/Feature/InboxViewTest.php`
 

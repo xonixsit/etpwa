@@ -139,7 +139,32 @@ php artisan db:table users --json | head -c 200
 
 Expected: `Migrations ... RUNNING` then `DONE` for the three default tables; `users` reported from `etp_wa_inbox`, i.e. the app is no longer on sqlite.
 
-- [ ] **Step 6: Add a config smoke test** — `tests/Feature/ConfigTest.php`
+- [ ] **Step 6: Make the suite independent of the developer's `.env`.** Laravel still loads `.env`
+under test (`phpunit.xml` sets `APP_ENV=testing`, and with no `.env.testing` present the framework
+falls back to `.env`), so any `WA_*` key Step 3 put there is visible to every test. Add this block
+inside the existing `<php>` element of `phpunit.xml`, after the `NIGHTWATCH_ENABLED` line. Leave
+every existing line — especially `DB_CONNECTION`, `DB_DATABASE`, `QUEUE_CONNECTION`, `CACHE_STORE` —
+exactly as it is:
+
+```xml
+        <env name="WA_ACCESS_TOKEN" value=""/>
+        <env name="WA_APP_SECRET" value=""/>
+        <env name="WA_VERIFY_TOKEN" value=""/>
+        <env name="WA_EXPORT_TOKEN" value=""/>
+        <env name="WA_PHONE_ID" value=""/>
+        <env name="WA_MY_NUMBER" value=""/>
+        <env name="WA_TEMPLATE_CHOICES" value=""/>
+        <env name="WA_HEADER_IMAGE_ETP_OPENER_BRAND" value=""/>
+        <env name="WA_ACK_TEXT" value=""/>
+        <env name="WA_OPT_OUT_TEXT" value=""/>
+```
+
+Every later test that needs a value sets it with `config([...])` in its own `setUp`, so blanking the
+environment costs nothing and makes the assertions below test `config/whatsapp.php`'s **defaults**
+rather than whatever happens to be in one developer's `.env`. `APP_KEY` is deliberately not listed:
+it keeps coming from `.env`, which the encrypted-column tests in Task 2 need.
+
+- [ ] **Step 7: Add a config smoke test** — `tests/Feature/ConfigTest.php`
 
 ```php
 <?php
@@ -165,15 +190,15 @@ class ConfigTest extends TestCase
         $this->assertSame('', (string) config('whatsapp.token'),
             'the access token is never set in config/whatsapp.php');
         $this->assertSame([], config('whatsapp.template_choices'),
-            'phpunit.xml does not carry WA_TEMPLATE_CHOICES, so the parsed list is empty');
+            'with no WA_TEMPLATE_CHOICES in the environment the parsed list is empty');
         $this->assertIsArray(config('whatsapp.header_images'));
     }
 }
 ```
 
-`template_choices` is empty under test because `phpunit.xml` supplies no `WA_TEMPLATE_CHOICES`; the parsing itself is proved in Task 12, where the test sets the list explicitly.
+`template_choices` is empty under test because Step 6 blanks `WA_TEMPLATE_CHOICES`; the parsing itself is proved in Task 12, where the test sets the list explicitly.
 
-- [ ] **Step 7: Run it**
+- [ ] **Step 8: Run it**
 
 ```bash
 php artisan test tests/Feature/ConfigTest.php
@@ -181,10 +206,34 @@ php artisan test tests/Feature/ConfigTest.php
 
 Expected: 2 passed.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Record the key names in `.env.example`.** Task 16 deploys with
+`cp .env.example .env` and then fills every value "including the WA_ block", so the tracked example
+must carry the same key names Step 3 added to `.env`. Append the block with the non-secret values
+filled and the four secrets left empty:
+
+```
+WA_API_BASE=https://graph.facebook.com/v20.0
+WA_ACCESS_TOKEN=
+WA_PHONE_ID=1427706937088002
+WA_WABA_ID=1717463009877473
+WA_MY_NUMBER=12242144261
+WA_APP_SECRET=
+WA_VERIFY_TOKEN=
+WA_EXPORT_TOKEN=
+WA_TEMPLATE_CHOICES=etp_opener_brand,etp_welcome_c,etp_welcome_a,filing_deadline_reminder
+WA_HEADER_IMAGE_ETP_OPENER_BRAND=https://www.etaxplanner.com/assets/images/logo/etaxplanner_logo.png
+WA_ACK_TEXT=Thanks for your message. A human from E Tax Planner will reply here within one business day.
+WA_OPT_OUT_TEXT=You will not receive any more messages from E Tax Planner on this number.
+```
+
+Also set `DB_CONNECTION=mysql`, `DB_HOST=127.0.0.1`, `DB_PORT=3306`, `DB_DATABASE=etp_wa_inbox`,
+`DB_USERNAME=etp_wa`, `DB_PASSWORD=` in `.env.example` so the production shape is visible. No secret
+value goes in this file — it is tracked.
+
+- [ ] **Step 10: Commit**
 
 ```bash
-git add config/whatsapp.php tests/Feature/ConfigTest.php
+git add config/whatsapp.php tests/Feature/ConfigTest.php phpunit.xml .env.example
 git commit -m "feat: MySQL connection, whatsapp config, env keys"
 ```
 

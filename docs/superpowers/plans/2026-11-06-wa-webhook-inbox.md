@@ -361,7 +361,7 @@ return new class extends Migration
             $table->string('error_code', 12)->nullable();
             $table->string('error_title')->nullable();
             $table->boolean('auto_reply')->default(false);
-            $table->timestamp('sent_at');
+            $table->timestamp('sent_at')->useCurrent();
             $table->longText('raw')->nullable();
             $table->timestamps();
             $table->index(['wa_contact_id', 'sent_at']);
@@ -370,7 +370,7 @@ return new class extends Migration
 
         Schema::create('wa_webhook_events', function (Blueprint $table) {
             $table->id();
-            $table->timestamp('received_at');
+            $table->timestamp('received_at')->useCurrent();
             $table->string('entry_id', 64)->nullable();
             $table->string('phone_number_id', 64)->nullable();
             $table->longText('changes')->nullable();
@@ -391,6 +391,8 @@ return new class extends Migration
 ```
 
 Note the deliberate absence of `enum` and of a unique index on `meta_id` — `meta_id` is nullable and deduped in code (`WaMessage::record`), which keeps the table portable and still idempotent for Meta's retries.
+
+Both NOT NULL timestamps carry `->useCurrent()`, and that is load-bearing, not decoration. MariaDB 10.4 runs with `explicit_defaults_for_timestamp=0`, where the FIRST TIMESTAMP column of a table gets `DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP` automatically only if it is NOT NULL with no explicit default. In `wa_messages` the first TIMESTAMP is the nullable `status_at`, so the auto-default never reaches `sent_at`; `sent_at` then inherits the implicit zero-date default, which Laravel's strict session (`NO_ZERO_DATE` + `STRICT_TRANS_TABLES`) rejects at CREATE TABLE time with error 1067. An explicit `DEFAULT CURRENT_TIMESTAMP` fixes it and is valid on MySQL 8 and sqlite too. In `wa_webhook_events`, `received_at` IS the first TIMESTAMP, so the bare form creates successfully but silently acquires `ON UPDATE CURRENT_TIMESTAMP` — any later UPDATE of an event row would rewrite the arrival time and defeat Task 14's 30-day retention prune. Supplying `->useCurrent()` explicitly suppresses that auto-`ON UPDATE`. Verified by probe on MariaDB 10.4.32: bare `sent_at` fails 1067; `useCurrent()` on both columns creates cleanly with an empty `Extra` (no `ON UPDATE`) on each. Every code path sets both columns explicitly, so the defaults are inert in practice. The three nullable timestamps need nothing.
 
 - [ ] **Step 4: `app/Models/WaContact.php`**
 

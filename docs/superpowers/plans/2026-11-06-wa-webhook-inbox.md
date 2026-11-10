@@ -804,7 +804,7 @@ class WebhookVerifyTest extends TestCase
     {
         $this->get('/wa/webhook?hub.mode=subscribe&hub.verify_token=nope&hub.challenge=chk123')
             ->assertForbidden()
-            ->assertContentDoesNotContain('chk123');
+            ->assertDontSee('chk123');
     }
 
     public function test_rejects_when_verify_token_is_not_configured()

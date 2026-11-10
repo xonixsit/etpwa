@@ -207,6 +207,24 @@ class IngestRowsTest extends TestCase
         $this->assertSame(WaMessage::INCOMING, WaMessage::where('meta_id', 'wamid.R4')->value('status'));
     }
 
+    public function test_a_record_over_an_inbound_row_cannot_write_a_delivery_state(): void
+    {
+        // R30 on the other writer. R4 covers applyStatus(), which has its own direction check; the
+        // same guard sits in record(), and Task 13's import re-records wamids through that path.
+        $c = WaContact::factory()->create(['phone' => '18479043315']);
+        WaMessage::record([
+            'wa_contact_id' => $c->id, 'meta_id' => 'wamid.R9', 'direction' => WaMessage::IN,
+            'type' => 'text', 'body' => 'hi', 'status' => WaMessage::INCOMING, 'sent_at' => now(),
+        ]);
+
+        WaMessage::record([
+            'wa_contact_id' => $c->id, 'meta_id' => 'wamid.R9', 'direction' => WaMessage::IN,
+            'type' => 'text', 'body' => 'hi', 'status' => WaMessage::DELIVERED, 'sent_at' => now(),
+        ]);
+
+        $this->assertSame(WaMessage::INCOMING, WaMessage::where('meta_id', 'wamid.R9')->value('status'));
+    }
+
     public function test_the_error_fields_travel_with_the_status_that_wrote_them(): void
     {
         $c = WaContact::factory()->create(['phone' => '18479043315']);
@@ -216,7 +234,10 @@ class IngestRowsTest extends TestCase
             'error_code' => '131047', 'error_title' => 'Message undeliverable',
         ]);
 
-        ProcessInboundEvent::dispatchSync($this->statusItem('wamid.R5', 'read', now()));
+        // The receipt deliberately arrives still carrying the error fields from the earlier
+        // generation: without the ternaries the row would read `delivered` alongside `131047`,
+        // the internally impossible pair Task 11 would paint green.
+        ProcessInboundEvent::dispatchSync($this->statusItem('wamid.R5', 'read', now(), '131047', 'Message undeliverable'));
 
         $m = WaMessage::where('meta_id', 'wamid.R5')->firstOrFail();
         $this->assertSame(WaMessage::READ, $m->status);

@@ -2556,7 +2556,7 @@ the file already calls two lines below:
         $mine = WaContact::digitsOnly(self::str(config('whatsapp.my_number')));
 ```
 
-**Tests for Step 8.** Append to `tests/Feature/IngestRowsTest.php` (14 tests after this), using the
+**Tests for Step 8.** Append to `tests/Feature/IngestRowsTest.php` (15 tests after this), using the
 same hand-built item shapes Step 1 uses -- they go through the job, not the parser, so R29's caps do
 not apply to them:
 
@@ -2632,6 +2632,24 @@ not apply to them:
         $this->assertSame(WaMessage::INCOMING, WaMessage::where('meta_id', 'wamid.R4')->value('status'));
     }
 
+    public function test_a_record_over_an_inbound_row_cannot_write_a_delivery_state(): void
+    {
+        // R30 on the other writer. R4 covers applyStatus(), which has its own direction check; the
+        // same guard sits in record(), and Task 13's import re-records wamids through that path.
+        $c = WaContact::factory()->create(['phone' => '18479043315']);
+        WaMessage::record([
+            'wa_contact_id' => $c->id, 'meta_id' => 'wamid.R9', 'direction' => WaMessage::IN,
+            'type' => 'text', 'body' => 'hi', 'status' => WaMessage::INCOMING, 'sent_at' => now(),
+        ]);
+
+        WaMessage::record([
+            'wa_contact_id' => $c->id, 'meta_id' => 'wamid.R9', 'direction' => WaMessage::IN,
+            'type' => 'text', 'body' => 'hi', 'status' => WaMessage::DELIVERED, 'sent_at' => now(),
+        ]);
+
+        $this->assertSame(WaMessage::INCOMING, WaMessage::where('meta_id', 'wamid.R9')->value('status'));
+    }
+
     public function test_the_error_fields_travel_with_the_status_that_wrote_them(): void
     {
         $c = WaContact::factory()->create(['phone' => '18479043315']);
@@ -2641,7 +2659,10 @@ not apply to them:
             'error_code' => '131047', 'error_title' => 'Message undeliverable',
         ]);
 
-        ProcessInboundEvent::dispatchSync($this->statusItem('wamid.R5', 'read', now()));
+        // The receipt deliberately arrives still carrying the error fields from the earlier
+        // generation: without the ternaries the row would read `delivered` alongside `131047`,
+        // the internally impossible pair Task 11 would paint green.
+        ProcessInboundEvent::dispatchSync($this->statusItem('wamid.R5', 'read', now(), '131047', 'Message undeliverable'));
 
         $m = WaMessage::where('meta_id', 'wamid.R5')->firstOrFail();
         $this->assertSame(WaMessage::READ, $m->status);
@@ -2798,33 +2819,54 @@ php artisan test tests/Feature/IngestRowsTest.php tests/Feature/WebhookParserTes
 php artisan test
 ```
 
-Expected: **14 passed** in the rows file and **16** in the parser file, and full suite **59 passed**
-(49 after round 1, plus 8 rows tests, plus 2 parser tests). Then prove each new guard is load-bearing
-by mutation, one at a time, restoring and re-running after each (the `wamid` letters below are the
-test that must fail):
+Expected: **15 passed** in the rows file and **16** in the parser file, and full suite **60 passed**
+(49 after round 1, plus 9 rows tests, plus 2 parser tests). Then prove each new guard is load-bearing
+by mutation, one at a time, restoring and re-running after each. The `wamid` letters below are the
+tests that must fail, and the measured output is written under each -- this list is the record of the
+run, not a prediction. The first pass found two mutations that left the suite green (marked
+*found dead*); Step 8's R9 test and Step 8's error-carrying R5 receipt are what closed them, so this
+round ships one test more than the ruling first asked for.
 
 - `mayReplaceStatus()` returning `true` unconditionally -> R1, R2, R3 fail.
-- `mayReplaceStatus()` returning `false` unconditionally -> R5 fails, and round 1's
-  `test_status_maps_onto_the_sent_row_and_never_moves_backwards` fails (so the rule cannot be a
-  blanket "never write").
-- the `direction === self::IN` checks deleted from `record()` and `applyStatus()` -> R4 fails.
+  Measured: `3 failed, 28 passed`.
+- `mayReplaceStatus()` returning `false` unconditionally -> R5 plus round 1's
+  `test_status_maps_onto_the_sent_row_and_never_moves_backwards` and
+  `test_failed_status_records_the_error` fail, so the rule cannot be a blanket "never write".
+  Measured: `3 failed, 28 passed`.
+- the `direction === self::IN` check deleted from `record()` -> R9 fails. *Found dead:* the first
+  pass deleted only this one and R4 still passed, because R4 goes through `applyStatus()`, which
+  carries its own copy of the check -- nothing tested `record()`'s.
+- the same check deleted from `applyStatus()` -> R4 fails. Measured: `1 failed, 30 passed` each.
 - the `'error_code' => $terminal ? … : null` ternaries replaced with `$code` / `$title` -> R5 fails.
-- `MIN_EPOCH` back to `1` and the ceiling back to `4e10` -> the parser's future-timestamp test fails.
+  Measured: `1 failed, 30 passed`. *Found dead* as first written: the receipt R5 dispatched carried no
+  error fields, so both versions of the code wrote `null` and the assertion could not tell them
+  apart. The test now dispatches a `read` that still holds `131047 / Message undeliverable`, which is
+  the case the ternaries exist for.
+- `MIN_EPOCH` back to `1` **and** the ceiling back to `4e10` -> the parser's future-timestamp test
+  fails. Measured: `1 failed, 30 passed`.
   `test_a_missing_or_absurd_timestamp_is_null_not_now` keeps passing under this one: it only covers
   the near side, which is exactly the gap R31 is about.
-- `digitsOnly()` removed from the `$mine` line -> the punctuation test fails.
+- `digitsOnly()` removed from the `$mine` line -> the punctuation test fails. Measured: `1 failed, 30 passed`.
 - `greaterThan` removed from `touchInbound()` -> R6 fails (round 1 shipped this mutation unnoticed).
-- the ownership check removed from the job's `status()` -> R8 fails.
-- the `if ($item['sent_at'] !== null)` guard removed -> R7 fails.
+  Measured: `1 failed, 30 passed`.
+- the ownership check removed from the job's `status()` -> R8 fails. Measured: `1 failed, 30 passed`.
+- the `if ($item['sent_at'] !== null)` guard removed -> R7 fails. Measured: `1 failed, 30 passed`.
+
+All ten now break something, and each names the test that breaks.
 
 Any mutation that leaves the suite green is a test that does not test anything -- report it rather
 than shipping it.
 
 - [ ] **Step 10: Commit round 2**
 
+The code and the first set of tests go in one commit; the two tests Step 9 had to add or strengthen to
+make its own mutations bite go in a second, so the ledger shows which round each came from.
+
 ```bash
 git add app config/database.php tests/Feature/IngestRowsTest.php tests/Feature/WebhookParserTest.php
 git commit -m "fix: keep delivery states monotonic, bound timestamps to what the schema can hold"
+git add tests/Feature/IngestRowsTest.php
+git commit -m "test: make the R30 direction guard and the error-field ternaries actually observable"
 ```
 
 **Carried out of round 1 without code** (each lands in the task named, and Task 16's list is the one

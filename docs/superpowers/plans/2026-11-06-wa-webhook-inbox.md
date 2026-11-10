@@ -1066,6 +1066,23 @@ class WebhookIngestTest extends TestCase
         $this->postCallback('not json at all')->assertOk();
         $this->assertSame(WaWebhookEvent::IGNORED, WaWebhookEvent::first()->status);
     }
+
+    public function test_a_non_string_entry_id_is_recorded_as_null_instead_of_fatalling()
+    {
+        // Ruling R23. $payload['entry'][0]['id'] goes straight into store()'s
+        // ?string $entryId, so under this app's coercive typing an int survives but an
+        // array or object raises a TypeError -- and a TypeError is a 500, the response
+        // class that makes Meta retry and then drop the subscription outright. Only a
+        // body correctly signed with the app secret reaches this line, so it is
+        // hardening rather than a hole, but the cost of getting it wrong is external.
+        // Reverting the guard below to the bare lookup makes this the test that notices.
+        $raw = str_replace('"id":"1717463009877473"', '"id":["a","b"]',
+            file_get_contents(base_path('tests/Fixtures/inbound_text.json')));
+
+        $this->postCallback($raw)->assertOk();
+        $this->assertSame(WaWebhookEvent::STORED, WaWebhookEvent::first()->status);
+        $this->assertNull(WaWebhookEvent::first()->entry_id);
+    }
 }
 ```
 
@@ -1242,7 +1259,7 @@ class WebhookParser
 
         $parsed = WebhookParser::parse($payload, (string) config('whatsapp.phone_id', ''));
         $hash = hash('sha256', $raw);
-        $entryId = $payload['entry'][0]['id'] ?? null;
+        $entryId = $this->stringOrNull($payload['entry'][0]['id'] ?? null);
         $ours = (string) config('whatsapp.phone_id', '');
         $numberFor = $parsed['matched'] ? $ours : $parsed['phone_number_id'];
 
@@ -1269,6 +1286,18 @@ class WebhookParser
         return $this->accepted();
     }
 
+    /**
+     * Same rule as param(), one step further along the request: anything we hand to a
+     * typed argument comes from a body Meta signs with our app secret, so a value that
+     * is not a string is not a format we recognise and must not be able to raise a
+     * TypeError. A TypeError is a 500, and a 500 on the POST is what makes Meta drop
+     * the subscription (Ruling R23).
+     */
+    private function stringOrNull(mixed $value): ?string
+    {
+        return is_string($value) ? $value : null;
+    }
+
     private function accepted()
     {
         return response('', 200);
@@ -1279,6 +1308,16 @@ class WebhookParser
         // Task 5 replaces this with ProcessInboundEvent::dispatch($item).
     }
 ```
+
+Ruling R23 is the `stringOrNull()` guard on the entry id. Every other value handed to a typed
+parameter here is already stringly-typed by construction (`$hash`, `$ours`, `$parsed['items']`,
+and the parser's own `is_string` check on `phone_number_id`), but `entry[0]['id']` is read
+straight out of the decoded body. Without the guard, `{"entry":[{"id":["a","b"]}]}` correctly
+signed with the app secret raises `TypeError: WaWebhookEvent::store(): Argument #2 ($entryId)
+must be of type ?string, array given` and answers 500 — verified by mutation, so the test in
+Step 2 detects it rather than merely sitting beside it. Same principle as R17, applied one step
+further along the request: the shape of a callback must never be able to decide whether we stay
+subscribed.
 
 Add the imports at the top of the controller: `use App\Support\WebhookParser;`, `use App\Support\WebhookSignature;`, `use App\Models\WaWebhookEvent;`.
 
@@ -1343,7 +1382,8 @@ these paths back under `web`, the machine endpoints are the ones that must stay 
 php artisan test tests/Feature/WebhookIngestTest.php
 ```
 
-Expected: 6 passed.
+Expected: **7 passed** — the six this task's steps describe, plus the R23 entry-id guard. Full
+suite: **27 passed**.
 
 - [ ] **Step 9: Commit**
 

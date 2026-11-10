@@ -29,7 +29,7 @@ class WebhookParser
                 $value = self::arr(self::arr($change)['value'] ?? null);
                 $numberId = self::str(self::path($value, 'metadata', 'phone_number_id'), 64);
 
-                if ($numberId !== $phoneId) {
+                if ($phoneId === '' || $numberId !== $phoneId) {
                     if ($seen === null && $numberId !== '') {
                         $seen = $numberId;
                     }

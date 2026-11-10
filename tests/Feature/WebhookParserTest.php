@@ -181,4 +181,23 @@ class WebhookParserTest extends TestCase
         $this->assertSame('in', $parsed['items'][0]['direction']);
         $this->assertSame('12242144261', $parsed['items'][0]['phone']);
     }
+
+    public function test_an_unconfigured_phone_id_matches_no_callback_at_all(): void
+    {
+        // Deliberately not bodyOf(): this callback carries no metadata at all,
+        // which is what made an unset WA_PHONE_ID compare equal to it.
+        $body = ['entry' => [['id' => '1', 'changes' => [['field' => 'messages', 'value' => [
+            'messages' => [['from' => '15550001111', 'id' => 'wamid.FOREIGN',
+                'type' => 'text', 'text' => ['body' => 'not ours']]],
+        ]]]]]];
+
+        $this->assertSame([], WebhookParser::parse($body, '')['items']);
+        $this->assertFalse(WebhookParser::parse($body, '')['matched']);
+        $this->assertFalse(WebhookParser::parse($body, self::OURS)['matched']);
+
+        // Control: the guard must not cost us real callbacks.
+        $this->assertTrue(WebhookParser::parse($this->bodyOf([
+            'messages' => [['from' => '18479043315', 'id' => 'wamid.MINE', 'text' => ['body' => 'hi']]],
+        ]), self::OURS)['matched']);
+    }
 }

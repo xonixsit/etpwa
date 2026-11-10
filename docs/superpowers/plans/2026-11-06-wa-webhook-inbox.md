@@ -833,16 +833,40 @@ class WaWebhookController extends Controller
     public function verify(Request $request): Response
     {
         $token = (string) config('whatsapp.verify_token', '');
-        $sent = (string) $request->query('hub.verify_token', '');
+        $sent = (string) ($request->query('hub.verify_token')
+            ?? $request->query('hub_verify_token'));
 
         if ($token === '' || !hash_equals($token, $sent)) {
             return response('forbidden', 403);
         }
 
-        return response((string) $request->query('hub.challenge', ''), 200);
+        return response((string) ($request->query('hub.challenge')
+            ?? $request->query('hub_challenge')), 200);
     }
 }
 ```
+
+**Read the query string under BOTH spellings, and do not "simplify" this back to the
+dotted name alone.** Meta sends `hub.mode`/`hub.verify_token`/`hub.challenge` with
+literal dots, but PHP rewrites every non-alphanumeric byte in a query-string *key*
+to `_` while populating `$_GET`, so what Laravel actually receives is
+`hub_verify_token`. Probed on the `cli-server` SAPI under PHP 8.2.12:
+`QUERY_STRING` stays `hub.verify_token=...` while `array_keys($_GET)` comes back
+`["hub_mode","hub_verify_token","hub_challenge"]`. The same mangling happens in tests
+because Symfony builds the bag with `parse_str`. A controller that reads only the
+dotted key answers `403` to every legitimate handshake — in production, not just in
+the suite.
+
+The dotted lookup is kept first rather than dropped because `Arr::get` tests the
+literal key before it splits on dots (verified: a bag holding
+`'hub.verify_token'` resolves, a bag holding only `hub_verify_token` returns `null`),
+so the pair covers a runtime that preserves dots, such as a PSR-7 bridge. It is not
+dead weight and the order is not arbitrary: dotted first means the spelling Meta
+names on the wire wins if a client somehow supplies both.
+
+The GET test below needs no change — it puts the dotted names on the URL, which is
+exactly Meta's wire format, so it exercises the real mangling path. It was the
+handler that was wrong, not the assertion.
 
 - [ ] **Step 8: Add the route** to `routes/web.php` (after the existing `/` route, which Task 9 replaces):
 

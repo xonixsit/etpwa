@@ -11,7 +11,10 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        //
+        $middleware->validateCsrfTokens(except: [
+            'wa/webhook',
+            'inbound/record-send',
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //

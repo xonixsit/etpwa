@@ -2,6 +2,9 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\WaWebhookEvent;
+use App\Support\WebhookParser;
+use App\Support\WebhookSignature;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 
@@ -23,6 +26,62 @@ class WaWebhookController extends Controller
         }
 
         return response($challenge, 200);
+    }
+
+    public function ingest(Request $request)
+    {
+        $raw = $request->getContent();
+        $secret = (string) config('whatsapp.app_secret', '');
+
+        if (!WebhookSignature::isValid($raw, $request->header('X-Hub-Signature-256'), $secret)) {
+            return response('forbidden', 403);
+        }
+
+        $payload = json_decode($raw, true);
+        if (!is_array($payload)) {
+            WaWebhookEvent::store(null, null, ['body' => mb_substr($raw, 0, 2000)],
+                WaWebhookEvent::IGNORED, hash('sha256', $raw));
+
+            return $this->accepted();
+        }
+
+        $parsed = WebhookParser::parse($payload, (string) config('whatsapp.phone_id', ''));
+        $hash = hash('sha256', $raw);
+        $entryId = $payload['entry'][0]['id'] ?? null;
+        $ours = (string) config('whatsapp.phone_id', '');
+        $numberFor = $parsed['matched'] ? $ours : $parsed['phone_number_id'];
+
+        if (WaWebhookEvent::seenBefore($hash)) {
+            WaWebhookEvent::store($numberFor, $entryId, $parsed['items'],
+                WaWebhookEvent::DUPLICATE, $hash);
+
+            return $this->accepted();
+        }
+
+        if (!$parsed['matched']) {
+            WaWebhookEvent::store($numberFor, $entryId, $parsed['items'],
+                WaWebhookEvent::IGNORED, $hash);
+
+            return $this->accepted();
+        }
+
+        WaWebhookEvent::store($ours, $entryId, $parsed['items'], WaWebhookEvent::STORED, $hash);
+
+        foreach ($parsed['items'] as $item) {
+            $this->dispatch($item);
+        }
+
+        return $this->accepted();
+    }
+
+    private function accepted()
+    {
+        return response('', 200);
+    }
+
+    protected function dispatch(array $item): void
+    {
+        // Task 5 replaces this with ProcessInboundEvent::dispatch($item).
     }
 
     /**

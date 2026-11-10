@@ -48,6 +48,8 @@ return new class extends Migration
             $table->longText('changes')->nullable();
             $table->string('signature_valid', 12)->default('unchecked');
             $table->string('status', 20)->default('stored');
+            $table->string('body_hash', 64)->nullable();
+            $table->index('body_hash');
             $table->timestamps();
             $table->index(['received_at', 'status']);
         });

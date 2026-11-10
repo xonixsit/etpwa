@@ -1830,7 +1830,7 @@ git commit -m "feat: signature-verified webhook ingest with replay and foreign-n
 **Deliverable:** parsed items become rows: profile names land on the contact, inbound messages set `last_inbound_at`, outbound rows are recorded, statuses map onto the row they belong to and never move backwards, statuses for unknown `wamid`s are dropped.
 
 **Consumes:** the item shapes from Task 4, `WaMessage::record()`, `WaContact::fromPhone()`.
-**Produces:** `App\Jobs\ProcessInboundEvent` (constructor `array $item`), `WaContact::touchInbound(CarbonInterface $at): void`, `WaContact::isDialable(string $digits): bool` (R28 — the parser calls it too), `WaMessage::applyStatus(string $status, CarbonInterface $at, ?string $code, ?string $title): void`.
+**Produces:** `App\Jobs\ProcessInboundEvent` (constructor `array $item`), `WaContact::touchInbound(CarbonInterface $at): void`, `WaContact::isDialable(string $digits): bool` (R28 — the parser calls it too), `WaMessage::applyStatus(string $status, CarbonInterface $at, ?string $code = null, ?string $title = null): void`, and the status rule `WaMessage::record()` shares with it (R30).
 
 - [ ] **Step 1: Write the failing test** — `tests/Feature/IngestRowsTest.php`
 
@@ -2355,6 +2355,7 @@ php artisan test
 Expected: **29 passed** (14 parser + 9 ingest + 6 rows) and full suite **49 passed** (40 today + the
 6 rows + 2 parser + 1 ingest). `QUEUE_CONNECTION=sync` in `phpunit.xml` runs the job inline — which
 is exactly why the R28 guards matter, and exactly why the deployed driver must not be `sync`.
+(Step 8 is the review round that follows this commit; its counts are in Step 9.)
 
 - [ ] **Step 7: Commit**
 
@@ -2363,6 +2364,466 @@ git add app tests/Feature/IngestRowsTest.php tests/Feature/WebhookParserTest.php
         tests/Feature/WebhookIngestTest.php tests/Fixtures
 git commit -m "feat: normalise webhook items into contacts, messages and receipts"
 ```
+
+- [ ] **Step 8: Round 2 -- rulings R30, R31 and R32.** The round-1 review found three behaviours that
+the round-1 tests could not see. All three were reproduced by the controller against the committed
+code before being ruled (probe output quoted under each), so this step is written as final text to
+replace what Steps 3, 4 and 6 put in, not as advice.
+
+**R30 -- what a callback may overwrite, finished.** R27 fixed one case of this (`status` absent for an
+echo). The review found the general form: `RANK` only contained `sent/delivered/read`, so `failed`,
+`deleted` and `incoming` all read as rank 0, and `record()` was not rank-guarded at all. Measured on
+`f2b513b`, through the real job:
+
+```
+failed, then a delivered stamped an hour EARLIER -> status=delivered error_code=131047
+    error_title='Message undeliverable' status_at=2026-11-10 17:56:21   (was 18:56:21)
+failed, then record() called the way Task 6's sender calls it -> status=sent, error fields kept
+inbound row (status=incoming), then a delivered receipt -> status=delivered on an inbound message
+```
+
+So the deliverable's own sentence -- "statuses ... never move backwards" -- was false in three
+directions, and one of them is Task 6's write path. The rule, in one place, used by both writers:
+
+```php
+    private const RANK = [
+        self::SENT => 1,
+        self::DELIVERED => 2,
+        self::READ => 3,
+    ];
+
+    private const TERMINAL = [self::FAILED, self::DELETED];
+
+    /**
+     * R30: the one rule for changing a delivery state. Both writers go through it -- applyStatus()
+     * for a receipt and record() for a message item -- because the round-1 hole was exactly that
+     * record() had no opinion. A status may enter a terminal state from anywhere (a failure is
+     * always believed, and believed late: Meta does not order its callbacks) and may leave one only
+     * into another terminal state. Otherwise it has to move strictly forward, so a duplicate
+     * `delivered` cannot even rewrite `status_at`. `unknown` and `incoming` are deliberately
+     * unranked: they are not evidence of delivery, so they cannot outrank a receipt.
+     */
+    private static function mayReplaceStatus(?string $current, ?string $next): bool
+    {
+        if ($next === null) {
+            return false;
+        }
+
+        if ($current === null) {
+            return true;
+        }
+
+        if (in_array($current, self::TERMINAL, true)) {
+            return in_array($next, self::TERMINAL, true);
+        }
+
+        return in_array($next, self::TERMINAL, true)
+            || (self::RANK[$next] ?? 0) > (self::RANK[$current] ?? 0);
+    }
+```
+
+`record()` becomes -- and note the two keys it stops honouring once the row exists, which is the same
+rule applied to identity rather than to state: a `wamid`'s contact and direction are settled when the
+row is created, so a later callback that disagrees is noise, not news (this is what made I-3's
+mis-filed echo able to re-parent a row at all):
+
+```php
+    public static function record(array $attrs): self
+    {
+        $id = $attrs['meta_id'] ?? null;
+        $row = ($id === null || $id === '') ? null : self::where('meta_id', $id)->first();
+
+        if ($row === null) {
+            return self::create($attrs);
+        }
+
+        if ($row->direction === self::IN || !self::mayReplaceStatus($row->status, $attrs['status'] ?? null)) {
+            unset($attrs['status'], $attrs['status_at'], $attrs['error_code'], $attrs['error_title']);
+        }
+        unset($attrs['wa_contact_id'], $attrs['direction']);
+
+        $row->update($attrs);
+
+        return $row;
+    }
+
+    public function applyStatus(string $status, CarbonInterface $at, ?string $code = null, ?string $title = null): void
+    {
+        if ($this->direction === self::IN || !self::mayReplaceStatus($this->status, $status)) {
+            return;
+        }
+
+        $terminal = in_array($status, self::TERMINAL, true);
+
+        $this->update([
+            'status' => $status,
+            'status_at' => $at,
+            'error_code' => $terminal ? $code : null,
+            'error_title' => $terminal ? $title : null,
+        ]);
+    }
+```
+
+The old `applyStatus()` (with its own inline rank comparison and its separate terminal branch) is
+deleted, not kept alongside. An inbound row never carries a delivery state, so the direction check
+comes first in both writers: `findByMetaId()` is global and does not know which direction it matched.
+`error_code`/`error_title` are written in the same statement as the status they belong to, so a row
+can never read `delivered` while still holding `131047 / Message undeliverable` from an earlier
+generation -- which is the internally impossible pair that Task 11 would paint green.
+
+**R31 -- `ts()`'s band has to be the band the row can hold and the window can survive.** Step 6 of
+Task 4 chose the ceiling against *Carbon's* throw limit. The binding limits are elsewhere, and both
+were measured: the local MariaDB 10.4.32 (`STRICT_TRANS_TABLES`, session `SYSTEM` = Asia/Calcutta)
+rejects `3237-07-19` **and** `1970-01-01 00:00:01` with `SQLSTATE[22007] ... 1292 Incorrect datetime
+value`, because `wa_messages.sent_at`/`status_at` and `wa_contacts.last_inbound_at` are `timestamp`
+columns and a `timestamp` converts through the session zone -- so the storeable band moves with the
+host. `2096-10-02` rejected, `2038-01-19 03:14:07` accepted, on both zones. Same callback on the
+suite's sqlite: stored fine, HTTP **200**, which is R29's lesson one column over.
+
+The range error is the smaller half. Through the real job on sqlite, `timestamp: 1893456000` (2030)
+produced `last_inbound_at = 2030-01-01 00:00:00` with `windowOpen() === true`: a far-future stamp does
+not merely look wrong, it holds the 24-hour service window open for years -- and MariaDB stores 2030
+happily, so no ceiling short of `now` closes that. Hence a floor well above the epoch (the Business
+Platform did not exist before 2020, and the low end is where the session-zone conversion starts
+failing) and a ceiling one day ahead of the clock:
+
+```php
+    /**
+     * 2020-01-01. Below this it is not a callback: the Business Platform is newer than the value,
+     * and the low end of a MySQL `timestamp` is where a session zone east of UTC starts rejecting
+     * the write outright (`1970-01-01 00:00:01` is 1292 on a +05:30 box).
+     */
+    private const MIN_EPOCH = 1577836800;
+
+    /**
+     * Null, not `now()`: a callback with no usable timestamp does not get to invent
+     * one, because Task 5 would then have no way to tell "Meta said when" from "we
+     * guessed". Consumers coalesce (`$item['sent_at'] ?? now()`); wa_messages.sent_at
+     * is NOT NULL with useCurrent, so the fallback belongs at the write, not here.
+     *
+     * The band is not cosmetic at either end. Carbon::createFromTimestamp throws
+     * InvalidFormatException from roughly 1e14 upwards, and an uncaught throw here is a 500 -- so a
+     * signed body carrying `"timestamp":1e30` would drop the subscription. The far side has two
+     * more reasons: the `timestamp` columns reject a value past 2038 outright (1292, which under
+     * the deployed `database` queue is a silently lost receipt), and a future stamp lands in
+     * last_inbound_at, which is exactly what WaContact::windowOpen() reads -- so `1893456000` held
+     * a service window open until 2030 when measured through the real job. An event that already
+     * happened cannot be stamped in the future, so the ceiling is now plus a day of clock skew.
+     * `2147483647` is not enough of a ceiling: 2030 is under it.
+     */
+    private static function ts(mixed $epoch): ?CarbonInterface
+    {
+        if (!is_numeric($epoch) || $epoch < self::MIN_EPOCH
+            || $epoch > Carbon::now()->addDay()->getTimestamp()) {
+            return null;
+        }
+
+        return Carbon::createFromTimestamp((int) $epoch, 'UTC');
+    }
+```
+
+`MIN_EPOCH` sits immediately above `ts()`. Two lines in `config/database.php`, then: add
+`'timezone' => '+00:00',` to the `mysql` **and** `mariadb` connection arrays (the driver honours it --
+`vendor/laravel/framework/src/Illuminate/Database/Connectors/MySqlConnector.php:110-112` emits
+`time_zone='...'`). This is *not* what makes the range safe -- R31's floor and ceiling are, and they
+hold on a host nobody pinned. It is for the rows themselves: a value written under a +05:30 session
+and read under a +04:00 one is a different instant, and this database will be written on this laptop
+(Task 13's import) and read on the host. Recorded so nobody is surprised: rows already in the local
+`etp_wa_inbox` read 5.5 hours earlier after the pin. Dev data only, and Task 16 asserts
+`db now()` equals `php now()`.
+
+**R32 -- recognising our own traffic cannot depend on how the number is punctuated.**
+`$isOut = $mine !== '' && $from === $mine` compares raw strings, and `WA_MY_NUMBER` is
+byte-compared against Meta's `from`. Measured with the same fixture, only the config changing:
+
+```
+WA_MY_NUMBER='12242144261'      -> direction=out phone=18479043315   (the echo, correctly)
+WA_MY_NUMBER='+1 (224) 214-4261' -> direction=in  phone=12242144261   (our own number, as a contact)
+```
+
+and through the job that second row becomes `direction=in status=incoming` with a **second contact**
+and `last_inbound_at` set -- our own send opening a window against ourselves, and R27's receipt erased
+by the very echo R27 was written for. `+1 224 214 4261` is the spelling Meta itself uses in
+`display_phone_number` and the spelling a person types into an env file. One line, using the helper
+the file already calls two lines below:
+
+```php
+        $mine = WaContact::digitsOnly(self::str(config('whatsapp.my_number')));
+```
+
+**Tests for Step 8.** Append to `tests/Feature/IngestRowsTest.php` (14 tests after this), using the
+same hand-built item shapes Step 1 uses -- they go through the job, not the parser, so R29's caps do
+not apply to them:
+
+```php
+    private function statusItem(string $wamid, string $status, $at, ?string $code = null, ?string $title = null): array
+    {
+        return ['kind' => 'status', 'meta_id' => $wamid, 'phone' => '18479043315',
+            'status' => $status, 'error_code' => $code, 'error_title' => $title,
+            'status_at' => $at, 'raw' => []];
+    }
+
+    private function sentRow(string $wamid, string $status, ?string $code = null, ?string $title = null): WaContact
+    {
+        $c = WaContact::factory()->create(['phone' => '18479043315']);
+        WaMessage::record([
+            'wa_contact_id' => $c->id, 'meta_id' => $wamid, 'direction' => WaMessage::OUT,
+            'type' => 'template', 'status' => $status, 'sent_at' => now(), 'status_at' => now(),
+            'error_code' => $code, 'error_title' => $title,
+        ]);
+
+        return $c;
+    }
+
+    public function test_a_late_delivered_cannot_un_fail_a_message(): void
+    {
+        // R30. Meta does not order status callbacks, and record() is keyed on wamid: a delivered
+        // that arrives after a failure is a duplicate of an older event, not a new state.
+        $this->sentRow('wamid.R1', WaMessage::FAILED, '131047', 'Message undeliverable');
+        $failedAt = WaMessage::where('meta_id', 'wamid.R1')->value('status_at');
+
+        ProcessInboundEvent::dispatchSync($this->statusItem('wamid.R1', 'delivered', now()->subHour()));
+
+        $m = WaMessage::where('meta_id', 'wamid.R1')->firstOrFail();
+        $this->assertSame(WaMessage::FAILED, $m->status);
+        $this->assertSame('131047', $m->error_code);
+        $this->assertSame($failedAt, (string) $m->status_at, 'and it must not move the clock either');
+    }
+
+    public function test_a_second_record_cannot_downgrade_a_failed_row(): void
+    {
+        // R30, the Task 6 path: the sender re-records the same wamid. applyStatus() was not the
+        // only writer, which is how round 1 left this open.
+        $c = $this->sentRow('wamid.R2', WaMessage::FAILED, '131047', 'Message undeliverable');
+        WaMessage::record([
+            'wa_contact_id' => $c->id, 'meta_id' => 'wamid.R2', 'direction' => WaMessage::OUT,
+            'type' => 'template', 'status' => WaMessage::SENT, 'sent_at' => now(),
+        ]);
+
+        $m = WaMessage::where('meta_id', 'wamid.R2')->firstOrFail();
+        $this->assertSame(WaMessage::FAILED, $m->status);
+        $this->assertSame('Message undeliverable', $m->error_title);
+    }
+
+    public function test_a_read_cannot_resurrect_a_deleted_message(): void
+    {
+        $this->sentRow('wamid.R3', WaMessage::DELETED);
+        ProcessInboundEvent::dispatchSync($this->statusItem('wamid.R3', 'read', now()));
+
+        $this->assertSame(WaMessage::DELETED, WaMessage::where('meta_id', 'wamid.R3')->value('status'));
+    }
+
+    public function test_an_inbound_row_never_acquires_a_delivery_state(): void
+    {
+        $c = WaContact::factory()->create(['phone' => '18479043315']);
+        WaMessage::record([
+            'wa_contact_id' => $c->id, 'meta_id' => 'wamid.R4', 'direction' => WaMessage::IN,
+            'type' => 'text', 'body' => 'hi', 'status' => WaMessage::INCOMING, 'sent_at' => now(),
+        ]);
+
+        ProcessInboundEvent::dispatchSync($this->statusItem('wamid.R4', 'delivered', now()));
+
+        $this->assertSame(WaMessage::INCOMING, WaMessage::where('meta_id', 'wamid.R4')->value('status'));
+    }
+
+    public function test_the_error_fields_travel_with_the_status_that_wrote_them(): void
+    {
+        $c = WaContact::factory()->create(['phone' => '18479043315']);
+        WaMessage::record([
+            'wa_contact_id' => $c->id, 'meta_id' => 'wamid.R5', 'direction' => WaMessage::OUT,
+            'type' => 'template', 'status' => WaMessage::DELIVERED, 'sent_at' => now(),
+            'error_code' => '131047', 'error_title' => 'Message undeliverable',
+        ]);
+
+        ProcessInboundEvent::dispatchSync($this->statusItem('wamid.R5', 'read', now()));
+
+        $m = WaMessage::where('meta_id', 'wamid.R5')->firstOrFail();
+        $this->assertSame(WaMessage::READ, $m->status);
+        $this->assertNull($m->error_code, 'a row must not hold an error from another generation');
+        $this->assertNull($m->error_title);
+    }
+
+    public function test_an_older_inbound_does_not_pull_the_service_window_backwards(): void
+    {
+        // The monotonic half of touchInbound(), which round 1 left untested: with the greaterThan
+        // comparison deleted the whole suite still passed, and windowOpen() flipped true -> false.
+        $c = WaContact::factory()->create(['phone' => '18479043315', 'last_inbound_at' => now()]);
+        $before = $c->last_inbound_at;
+        $item = $this->statusItem('wamid.R6', 'delivered', now());
+        $item = [
+            'kind' => 'message', 'meta_id' => 'wamid.R6', 'phone' => '18479043315',
+            'direction' => WaMessage::IN, 'type' => 'text', 'text' => 'late replay',
+            'template_name' => null, 'template_lang' => null, 'button_id' => null,
+            'sent_at' => now()->subHours(30), 'raw' => [],
+        ];
+
+        ProcessInboundEvent::dispatchSync($item);
+
+        $this->assertSame((string) $before, (string) $c->refresh()->last_inbound_at);
+        $this->assertTrue($c->windowOpen());
+    }
+
+    public function test_an_inbound_without_a_usable_timestamp_does_not_open_the_window(): void
+    {
+        // R31's other side. The row still gets a sent_at, because the column is NOT NULL, but an
+        // invented time is not proof that the customer replied inside 24 hours -- and last_inbound_at
+        // is what Task 12's free-form gate reads. Pessimistic is the only safe direction here.
+        $c = WaContact::factory()->create(['phone' => '18479043315', 'last_inbound_at' => now()->subHours(30)]);
+
+        ProcessInboundEvent::dispatchSync([
+            'kind' => 'message', 'meta_id' => 'wamid.R7', 'phone' => '18479043315',
+            'direction' => WaMessage::IN, 'type' => 'text', 'text' => 'no stamp',
+            'template_name' => null, 'template_lang' => null, 'button_id' => null,
+            'sent_at' => null, 'raw' => [],
+        ]);
+
+        $this->assertFalse($c->refresh()->windowOpen());
+        $this->assertNotNull(WaMessage::where('meta_id', 'wamid.R7')->value('sent_at'));
+    }
+
+    public function test_a_receipt_naming_another_number_does_not_move_this_contacts_row(): void
+    {
+        $a = $this->sentRow('wamid.R8', WaMessage::SENT);
+        WaContact::factory()->create(['phone' => '15551234567']);
+        $item = $this->statusItem('wamid.R8', 'read', now());
+        $item['phone'] = '15551234567';
+
+        ProcessInboundEvent::dispatchSync($item);
+
+        $this->assertSame(WaMessage::SENT, WaMessage::where('meta_id', 'wamid.R8')->value('status'));
+        $this->assertSame($a->id, (int) WaMessage::where('meta_id', 'wamid.R8')->value('wa_contact_id'));
+    }
+```
+
+One more edit to that file, in `test_the_outbound_echo_does_not_erase_a_receipt_already_recorded`
+(M-4): the status assertion there also passed when `record()` was mutated into a plain `create()`,
+because `firstOrFail()` returned the seeded row and the duplicate was ignored. Immediately before the
+`assertSame(WaMessage::DELIVERED, …)` line, add:
+
+```php
+        $this->assertCount(1, WaMessage::where('meta_id', 'wamid.OUT1')->get(),
+            'the echo must update the sender row, never add a second one');
+```
+
+Append to `tests/Feature/WebhookParserTest.php` (16 tests after this) -- R31 and R32 at the reader,
+where the rest of the band lives:
+
+```php
+    public function test_a_timestamp_in_the_future_is_not_a_timestamp(): void
+    {
+        // R31: the far side of the band is not only a bad date, it is last_inbound_at, and
+        // last_inbound_at is the 24-hour service window. 2030 stores happily on MariaDB, so a
+        // 2038 ceiling would not have closed this.
+        $future = WebhookParser::parse($this->bodyOf([
+            'messages' => [['from' => '18479043315', 'id' => 'wamid.F1',
+                'timestamp' => '1893456000', 'text' => ['body' => 'hi']]],
+        ]), self::OURS);
+        $this->assertNull($future['items'][0]['sent_at']);
+
+        $skew = WebhookParser::parse($this->bodyOf([
+            'messages' => [['from' => '18479043315', 'id' => 'wamid.F2',
+                'timestamp' => (string) Carbon::now()->addHours(2)->getTimestamp(),
+                'text' => ['body' => 'hi']]],
+        ]), self::OURS);
+        $this->assertNotNull($skew['items'][0]['sent_at'], 'a clock a little ahead is still a callback');
+    }
+
+    public function test_our_own_number_is_recognised_whatever_punctuation_it_is_configured_with(): void
+    {
+        // R32: WA_MY_NUMBER is compared against Meta's `from`. '+1 (224) 214-4261' is how a person
+        // writes it and how display_phone_number reads; both must still mean "this is our traffic".
+        config(['whatsapp.my_number' => '+1 (224) 214-4261']);
+
+        $parsed = WebhookParser::parse($this->bodyOf([
+            'messages' => [['from' => '12242144261', 'to' => '18479043315', 'id' => 'wamid.E1',
+                'timestamp' => '1793996090', 'type' => 'template',
+                'template' => ['name' => 'opener_brand', 'language' => ['code' => 'en_US']]]],
+        ]), self::OURS);
+
+        $this->assertSame(WaMessage::OUT, $parsed['items'][0]['direction']);
+        $this->assertSame('18479043315', $parsed['items'][0]['phone']);
+    }
+```
+
+Add `use App\Models\WaMessage;` and `use Illuminate\Support\Carbon;` to that file's imports if they are
+not already there.
+
+In `app/Jobs/ProcessInboundEvent.php`, `message()`'s inbound branch and `status()` become (R31's
+coalescing rule plus the ownership check the review called M-3 -- `findByMetaId()` is global, so a
+receipt has to name the contact whose row it is landing on, and dropping it keeps the 200):
+
+```php
+        if ($inbound) {
+            // R31: an unusable timestamp is not evidence of a reply time, and last_inbound_at is
+            // what opens the service window, so the contact is left alone. The row above still
+            // gets now(), because wa_messages.sent_at is NOT NULL.
+            if ($item['sent_at'] !== null) {
+                $contact->touchInbound($item['sent_at']);
+            }
+            // Task 7 adds the automatic-response call here.
+        }
+```
+
+```php
+    private function status(): void
+    {
+        $item = $this->item;
+        $row = WaMessage::findByMetaId($item['meta_id']);
+        if ($row === null) {
+            return;
+        }
+
+        $contactId = WaContact::where('phone', $item['phone'])->value('id');
+        if ($contactId === null || (int) $row->wa_contact_id !== (int) $contactId) {
+            return;
+        }
+
+        $row->applyStatus($item['status'], $item['status_at'] ?? now(),
+            $item['error_code'], $item['error_title']);
+    }
+```
+
+`$at` is still built once at the top of `message()` and still used for `'sent_at' => $at`; only the
+`touchInbound()` call changes what it does with a null.
+
+- [ ] **Step 9: Run round 2**
+
+```bash
+php artisan test tests/Feature/IngestRowsTest.php tests/Feature/WebhookParserTest.php
+php artisan test
+```
+
+Expected: **14 passed** in the rows file and **16** in the parser file, and full suite **59 passed**
+(49 after round 1, plus 8 rows tests, plus 2 parser tests). Then prove each new guard is load-bearing
+by mutation, one at a time, restoring after each: `mayReplaceStatus()` returning `true` always (the
+R1/R2/R3/R4 tests must fail); the `direction === self::IN` checks removed (R4 and R8's neighbours
+fail); the error-field ternaries replaced by `$code`/`$title` (R5 fails); `MIN_EPOCH` back to `1` and
+the ceiling back to `4e10` (the parser's future test fails and `test_a_missing_or_absurd_timestamp_is
+_null_not_now` still passes -- it only covers the near side); `digitsOnly()` removed from the `$mine`
+line (the punctuation test fails); `greaterThan` removed from `touchInbound()` (R6 fails); the
+ownership check removed (R8 fails). Any mutation that leaves the suite green is a test that does not
+test anything -- report it rather than shipping it.
+
+- [ ] **Step 10: Commit round 2**
+
+```bash
+git add app config/database.php tests/Feature/IngestRowsTest.php tests/Feature/WebhookParserTest.php
+git commit -m "fix: keep delivery states monotonic, bound timestamps to what the schema can hold"
+```
+
+**Carried out of round 1 without code** (each lands in the task named, and Task 16's list is the one
+that must not lose them): a message item with no `id` stores `meta_id = null` and duplicates if Meta
+resends it with any byte difference -- the body hash absorbs an *identical* replay, so this is a
+Task 13 double-counting note, not a webhook defect (M-5). `00`-prefixed numbers stay distinct from
+the same number bare, so one person can be two contacts; if it is fixed it goes inside
+`digitsOnly()`, never in a second copy (M-7). The two new files and the fixture carry the Pint
+complaints the plan's own text produced, plus one new rule category at
+`app/Models/WaContact.php:45` (`!` spacing, straight from Step 4) -- Task 14 sweeps all of it (M-8,
+Q4). And **replaying a stored `wa_webhook_events.changes` item through this job is fatal**, because
+the `encrypted:array` round trip demotes `sent_at`/`status_at` to strings and `touchInbound()` is
+typed: `TypeError … Argument #1 ($at) must be of type Carbon\CarbonInterface, string given`. Nothing
+in the plan replays stored items today; any future backfill must go through `WebhookParser` again
+rather than through the stored array (M-9).
 
 ---
 
@@ -4764,6 +5225,22 @@ Database: etp_wa_inbox (created in Plesk) + dedicated DB user, host localhost
 Deployed commit: ______
 WA_PHONE_ID: 1427706937088002
 WA_WABA_ID: 1717463009877473
+WA_MY_NUMBER: 12242144261  (must be set before the first live callback: with it empty, our own
+  outbound traffic is filed as inbound against our own number, and R32's digit-normalising means a
+  punctuated value like +1 (224) 214-4261 also works -- but no value at all does not)
+QUEUE_CONNECTION: database  (NOT sync. Under sync an exception inside ProcessInboundEvent is an HTTP
+  500 to a correctly signed callback, and Meta drops the subscription after repeated 5xx. R28, R31)
+  Also running: php /var/www/<vhost>/httpdocs/artisan queue:work --tries=3  under a supervisor, or
+  process the queue some other way that cannot silently stop
+DB session timezone: php artisan tinker --execute="echo now()->toDateTimeString(), ' | ', DB::selectOne('select now() x')->x;"
+  must print the same instant twice (config/database.php pins time_zone='+00:00'; R31). If it does
+  not, the host is not honouring the pin and every timestamp on screen is offset.
+No backfill may hand a stored wa_webhook_events.changes item straight to ProcessInboundEvent: the
+  encrypted:array round trip returns sent_at/status_at as strings and touchInbound()/applyStatus()
+  are typed, so it throws. Re-parse through WebhookParser instead (M-9).
+webhook table note: body_hash was added by editing an already-applied migration
+  (2026_11_06_000001_create_wa_tables.php), so on the host that file must be run from scratch --
+  `migrate:status` will not show it as pending.
 Webhook URL: https://inbox.etaxplanner.com/wa/webhook
 Cron (Plesk > Scheduled Tasks, every minute):
   php /var/www/<vhost>/httpdocs/artisan schedule:run >> /dev/null 2>&1

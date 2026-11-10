@@ -29,6 +29,25 @@ class WaTablesTest extends TestCase
             'the first reason must win');
     }
 
+    public function test_window_opens_for_a_recent_inbound_and_closes_after_24_hours()
+    {
+        $recent = WaContact::factory()->create(['last_inbound_at' => now()->subHour()]);
+        $this->assertTrue($recent->windowOpen(),
+            'an inbound inside the 24-hour window must open it');
+
+        $stale = WaContact::factory()->create(['last_inbound_at' => now()->subHours(25)]);
+        $this->assertFalse($stale->windowOpen(),
+            'a 25-hour-old inbound must close it');
+
+        $edge = WaContact::factory()->create(['last_inbound_at' => now()->subHours(24)]);
+        $this->assertFalse($edge->windowOpen(),
+            'exactly 24 hours ago is already closed, not still open');
+
+        config(['whatsapp.window_hours' => 48]);
+        $this->assertTrue($stale->fresh()->windowOpen(),
+            'the window must come from config, not a hardcoded 24');
+    }
+
     public function test_message_record_dedupes_on_meta_id_and_encrypts_body()
     {
         $c = WaContact::factory()->create();

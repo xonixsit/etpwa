@@ -1685,6 +1685,29 @@ class WebhookParserTest extends TestCase
         $this->assertSame('failed', $status['status']);
     }
 
+    public function test_an_interactive_button_reply_yields_its_id_and_a_missing_type_gets_named(): void
+    {
+        $parsed = WebhookParser::parse($this->bodyOf([
+            'messages' => [
+                ['from' => '18479043315', 'id' => 'wamid.B1', 'timestamp' => '1793996000',
+                    'type' => 'interactive',
+                    'interactive' => ['type' => 'button', 'button_reply' => ['id' => 'yes_stop',
+                        'title' => 'Stop reminders']]],
+                ['from' => '18479043315', 'id' => 'wamid.B2', 'text' => ['body' => 'hi']],
+            ],
+        ]), self::OURS);
+
+        $button = $parsed['items'][0];
+        $this->assertSame('yes_stop', $button['button_id']);
+        $this->assertSame('interactive', $button['type']);
+        $this->assertSame('button', $button['raw']['interactive']['type']);
+        $this->assertNull($button['text']);
+
+        // The `?: 'unknown'` default is what keeps a type-less callback from rendering as an
+        // empty cell in the inbox; it is the one branch of `type` nothing else reached.
+        $this->assertSame('unknown', $parsed['items'][1]['type']);
+    }
+
     public function test_a_missing_or_absurd_timestamp_is_null_not_now(): void
     {
         $parsed = WebhookParser::parse($this->bodyOf([
@@ -1791,7 +1814,7 @@ live callback.
 php artisan test tests/Feature/WebhookIngestTest.php tests/Feature/WebhookParserTest.php
 ```
 
-Expected: **19 passed** (8 ingest + 11 parser). Full suite: **39 passed**.
+Expected: **20 passed** (8 ingest + 12 parser). Full suite: **40 passed**.
 
 - [ ] **Step 10: Commit**
 
@@ -1917,8 +1940,50 @@ class IngestRowsTest extends TestCase
         $this->assertSame('131047', $m->error_code);
         $this->assertSame('Message undeliverable', $m->error_title);
     }
+
+    public function test_the_outbound_echo_does_not_erase_a_receipt_already_recorded()
+    {
+        // Ruling R27. Meta echoes every message we send as a `messages` object with from =
+        // our own number, and the callback order is not guaranteed: the echo can arrive
+        // after the delivery status for the same wamid. record() is an updateOrCreate keyed
+        // on meta_id, and message() used to pass status => null for outbound, so that echo
+        // rolled a recorded receipt back to nothing (measured: 'delivered' -> NULL).
+        $c = WaContact::factory()->create(['phone' => '18479043315']);
+        WaMessage::record([
+            'wa_contact_id' => $c->id, 'meta_id' => 'wamid.OUT1', 'direction' => WaMessage::OUT,
+            'type' => 'template', 'status' => WaMessage::DELIVERED, 'sent_at' => now(),
+        ]);
+
+        ProcessInboundEvent::dispatchSync($this->items('outbound_echo.json')[0]);
+
+        $m = WaMessage::where('meta_id', 'wamid.OUT1')->firstOrFail();
+        $this->assertSame(WaMessage::DELIVERED, $m->status, 'the echo must not touch status');
+        $this->assertSame('opener_brand', $m->template_name, 'but it does fill in what it knows');
+    }
+
+    public function test_an_echo_for_a_message_this_app_never_sent_is_stored_without_a_status()
+    {
+        ProcessInboundEvent::dispatchSync($this->items('outbound_echo.json')[0]);
+
+        $m = WaMessage::where('meta_id', 'wamid.OUT1')->firstOrFail();
+        $this->assertSame(WaMessage::OUT, $m->direction);
+        $this->assertNull($m->status, 'a callback alone is not a receipt');
+        $this->assertSame('12242144261', $m->raw['from'], 'the payload is kept verbatim');
+    }
 }
 ```
+
+- [ ] **Step 1b: Add the fixture** — `tests/Fixtures/outbound_echo.json`, a real Cloud API
+  outbound echo (our number in `from`, the recipient in `to`, the same `wamid` the status
+  callbacks will later refer to). Written as one line, no trailing newline, like the other four:
+
+```json
+{"object":"whatsapp_business_account","entry":[{"id":"1717463009877473","changes":[{"field":"messages","value":{"messaging_product":"whatsapp","metadata":{"display_phone_number":"12242144261","phone_number_id":"1427706937088002"},"messages":[{"from":"12242144261","to":"18479043315","id":"wamid.OUT1","timestamp":"1793996090","type":"template","template":{"name":"opener_brand","language":{"code":"en_US"}}}]}}]}]}
+```
+
+Verified against the committed parser, not assumed: `WebhookParser::parse()` of this body yields
+exactly one item — `kind=message`, `direction=out`, `phone=18479043315`, `meta_id=wamid.OUT1`,
+`template_name=opener_brand`, `template_lang=en_US`.
 
 - [ ] **Step 2: Run it** — expected FAIL `Class "App\Jobs\ProcessInboundEvent" not found`.
 
@@ -1966,9 +2031,10 @@ class ProcessInboundEvent implements ShouldQueue
     {
         $item = $this->item;
         $at = $item['sent_at'] ?? now();
+        $inbound = $item['direction'] === WaMessage::IN;
 
         $contact = WaContact::fromPhone($item['phone']);
-        $row = WaMessage::record([
+        $attrs = [
             'wa_contact_id' => $contact->id,
             'meta_id' => $item['meta_id'],
             'direction' => $item['direction'],
@@ -1976,12 +2042,20 @@ class ProcessInboundEvent implements ShouldQueue
             'body' => $item['text'],
             'template_name' => $item['template_name'],
             'template_lang' => $item['template_lang'],
-            'status' => $item['direction'] === WaMessage::IN ? WaMessage::INCOMING : null,
             'sent_at' => $at,
             'raw' => $item['raw'],
-        ]);
+        ];
 
-        if ($item['direction'] === WaMessage::IN) {
+        // R27: status is only ever *claimed* for an inbound message. For an outbound echo the
+        // key is absent, so updateOrCreate leaves whatever the sender wrote (sent/delivered/
+        // read/failed) alone instead of blanking it.
+        if ($inbound) {
+            $attrs['status'] = WaMessage::INCOMING;
+        }
+
+        $row = WaMessage::record($attrs);
+
+        if ($inbound) {
             $contact->touchInbound($at);
             // Task 7 adds the automatic-response call here.
         }
@@ -2009,6 +2083,20 @@ timestamp; the job coalesces here rather than the parser deciding, and it has to
 (`nullableStr`), and `WaMessage::findByMetaId()` already refuses `null` and `''` before querying
 (app/Models/WaMessage.php:54-60), so an id-less status is dropped rather than matching some other
 row whose `meta_id` is `NULL`.
+
+Ruling R27 is the second half of the same warning: **what a callback may overwrite.** Meta sends an
+echo of every message we send (`messages` with `from` = our own number) and it does not promise the
+order of that echo against the status callbacks for the same `wamid`. `record()` is an
+`updateOrCreate` keyed on `meta_id`, so the original `status => …INCOMING : null` expression meant
+the echo wrote `status = NULL` over a receipt that had already arrived — measured through the real
+models before this ruling: `delivered` → `NULL`. Outbound status is therefore *absent* from the
+attribute array unless the item is inbound, which leaves whatever our own sender recorded
+(`sent`) and whatever a status callback advanced it to (`delivered`, `read`, `failed`) untouched.
+Two things follow and are now covered by tests in Step 1: an echo for a message this app never sent
+still creates its row, with `status = null` — a callback alone is not a receipt, and inventing `sent`
+here would claim a send this app cannot account for — and the echo's `raw` payload is stored
+verbatim, which is where `button_id` lives, because `wa_messages` has no `button_id` column
+(`grep -rn button_id app/ database/` finds only the parser).
 
 - [ ] **Step 4: Add the two model methods.** To `WaContact`:
 
@@ -2069,7 +2157,9 @@ with `use App\Jobs\ProcessInboundEvent;` added to the imports.
 php artisan test tests/Feature/IngestRowsTest.php
 ```
 
-Expected: 4 passed. (`QUEUE_CONNECTION=sync` in `phpunit.xml` runs the job inline; on a real queue the same code runs in the worker.)
+Expected: **6 passed** (4 as written above plus the two R27 echo tests). Full suite: **45 passed**
+(39 today + these 6). `QUEUE_CONNECTION=sync` in `phpunit.xml` runs the job inline; on a real queue
+the same code runs in the worker.
 
 - [ ] **Step 7: Commit**
 

@@ -75,4 +75,21 @@ class WebhookIngestTest extends TestCase
         $this->postCallback('not json at all')->assertOk();
         $this->assertSame(WaWebhookEvent::IGNORED, WaWebhookEvent::first()->status);
     }
+
+    public function test_a_non_string_entry_id_is_recorded_as_null_instead_of_fatalling()
+    {
+        // Ruling R23. $payload['entry'][0]['id'] goes straight into store()'s
+        // ?string $entryId, so under this app's coercive typing an int survives but an
+        // array or object raises a TypeError -- and a TypeError is a 500, the response
+        // class that makes Meta retry and then drop the subscription outright. Only a
+        // body correctly signed with the app secret reaches this line, so it is
+        // hardening rather than a hole, but the cost of getting it wrong is external.
+        // Reverting the guard below to the bare lookup makes this the test that notices.
+        $raw = str_replace('"id":"1717463009877473"', '"id":["a","b"]',
+            file_get_contents(base_path('tests/Fixtures/inbound_text.json')));
+
+        $this->postCallback($raw)->assertOk();
+        $this->assertSame(WaWebhookEvent::STORED, WaWebhookEvent::first()->status);
+        $this->assertNull(WaWebhookEvent::first()->entry_id);
+    }
 }

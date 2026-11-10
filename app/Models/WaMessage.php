@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -18,6 +19,7 @@ class WaMessage extends Model
     public const READ = 'read';
     public const FAILED = 'failed';
     public const INCOMING = 'incoming';
+    public const DELETED = 'deleted';
 
     protected $fillable = [
         'wa_contact_id', 'meta_id', 'direction', 'type', 'body', 'template_name',
@@ -58,5 +60,30 @@ class WaMessage extends Model
         }
 
         return self::where('meta_id', $id)->first();
+    }
+
+    private const RANK = [
+        self::SENT => 1,
+        self::DELIVERED => 2,
+        self::READ => 3,
+    ];
+
+    public function applyStatus(string $status, CarbonInterface $at, ?string $code, ?string $title): void
+    {
+        $current = self::RANK[$this->status] ?? 0;
+        $incoming = self::RANK[$status] ?? 0;
+
+        if ($status === self::FAILED || $status === self::DELETED) {
+            $this->update([
+                'status' => $status, 'status_at' => $at,
+                'error_code' => $code, 'error_title' => $title,
+            ]);
+
+            return;
+        }
+
+        if ($incoming > $current) {
+            $this->update(['status' => $status, 'status_at' => $at]);
+        }
     }
 }

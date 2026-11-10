@@ -2,6 +2,8 @@
 
 namespace Tests\Feature;
 
+use App\Models\WaContact;
+use App\Models\WaMessage;
 use App\Models\WaWebhookEvent;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -110,5 +112,20 @@ class WebhookIngestTest extends TestCase
         $message = collect(WaWebhookEvent::first()->changes)->firstWhere('kind', 'message');
         $this->assertNotNull($message);
         $this->assertNull($message['sent_at']);
+    }
+
+    public function test_a_callback_whose_message_number_is_unusable_still_stores_and_answers_200()
+    {
+        // Ruling R28. "12" is a non-empty digits string, so pre-R28 it parsed into a normal
+        // item and reached WaContact::fromPhone(), which throws below 10 digits -- three
+        // retries and a failed_jobs row per callback. The item dies at the parser instead,
+        // the audit row keeps the callback, and the usable contact from the same body lands.
+        $raw = str_replace('"from":"18479043315"', '"from":"12"',
+            file_get_contents(base_path('tests/Fixtures/inbound_text.json')));
+
+        $this->postCallback($raw)->assertOk();
+        $this->assertSame(WaWebhookEvent::STORED, WaWebhookEvent::first()->status);
+        $this->assertSame('18479043315', WaContact::query()->value('phone'));
+        $this->assertSame(0, WaMessage::count());
     }
 }

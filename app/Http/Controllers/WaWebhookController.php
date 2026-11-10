@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\ProcessInboundEvent;
 use App\Models\WaWebhookEvent;
 use App\Support\WebhookParser;
 use App\Support\WebhookSignature;
@@ -81,7 +82,7 @@ class WaWebhookController extends Controller
 
     protected function dispatch(array $item): void
     {
-        // Task 5 replaces this with ProcessInboundEvent::dispatch($item).
+        ProcessInboundEvent::dispatch($item);
     }
 
     /**

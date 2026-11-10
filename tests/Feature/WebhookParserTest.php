@@ -239,4 +239,45 @@ class WebhookParserTest extends TestCase
             'messages' => [['from' => '18479043315', 'id' => 'wamid.MINE', 'text' => ['body' => 'hi']]],
         ]), self::OURS)['matched']);
     }
+
+    public function test_a_number_too_short_to_store_is_dropped_where_it_is_read(): void
+    {
+        $parsed = WebhookParser::parse($this->bodyOf([
+            'messages' => [['from' => '12', 'id' => 'wamid.S1', 'text' => ['body' => 'hi']]],
+            'statuses' => [['id' => 'wamid.S2', 'recipient_id' => '999', 'status' => 'delivered']],
+            'contacts' => [['wa_id' => '55', 'profile' => ['name' => 'Short']]],
+        ]), self::OURS);
+
+        $this->assertSame([], $parsed['items']);
+        $this->assertTrue($parsed['matched'], 'dropping the items must not lose the match');
+    }
+
+    public function test_descriptive_fields_are_cut_to_the_column_width_and_a_too_long_phone_is_dropped(): void
+    {
+        $long = str_repeat('x', 300);
+
+        $parsed = WebhookParser::parse($this->bodyOf([
+            'contacts' => [['wa_id' => '18479043315', 'profile' => ['name' => $long]]],
+            'messages' => [['from' => '18479043315', 'id' => 'wamid.W1', 'type' => $long,
+                'text' => ['body' => 'hi'], 'template' => ['name' => $long,
+                    'language' => ['code' => $long]]]],
+            'statuses' => [['id' => 'wamid.W2', 'recipient_id' => '18479043315', 'status' => $long,
+                'errors' => [['code' => 131049, 'title' => $long]]]],
+        ]), self::OURS);
+
+        $this->assertCount(3, $parsed['items']);
+        $this->assertSame(255, mb_strlen($parsed['items'][0]['name']));
+        $this->assertSame(24, strlen($parsed['items'][1]['type']));
+        $this->assertSame(255, strlen($parsed['items'][1]['template_name']));
+        $this->assertSame(10, strlen($parsed['items'][1]['template_lang']));
+        $this->assertSame(24, strlen($parsed['items'][2]['status']));
+        $this->assertSame(255, strlen($parsed['items'][2]['error_title']));
+
+        $hostile = WebhookParser::parse($this->bodyOf([
+            'messages' => [['from' => '184790433159999999999999', 'id' => 'wamid.W3',
+                'text' => ['body' => 'hi']]],
+        ]), self::OURS);
+
+        $this->assertSame([], $hostile['items'], 'a truncated phone would be someone else');
+    }
 }

@@ -65,9 +65,9 @@ class WebhookParser
     {
         $contact = self::arr($raw);
         $phone = WaContact::digitsOnly(self::str($contact['wa_id'] ?? null));
-        $name = self::nullableStr(self::path($contact, 'profile', 'name'));
+        $name = self::nullableStr(self::path($contact, 'profile', 'name'), 255);
 
-        if ($phone === '' || $name === null) {
+        if (!WaContact::isDialable($phone) || $name === null) {
             return null;
         }
 
@@ -82,7 +82,7 @@ class WebhookParser
         $isOut = $mine !== '' && $from === $mine;
         $phone = WaContact::digitsOnly($isOut ? self::str($m['to'] ?? null) : $from);
 
-        if ($phone === '') {
+        if (!WaContact::isDialable($phone)) {
             return null;
         }
 
@@ -91,15 +91,15 @@ class WebhookParser
             'meta_id' => self::nullableStr($m['id'] ?? null, 128),
             'phone' => $phone,
             'direction' => $isOut ? \App\Models\WaMessage::OUT : \App\Models\WaMessage::IN,
-            'type' => self::str($m['type'] ?? null) ?: 'unknown',
+            'type' => self::str($m['type'] ?? null, 24) ?: 'unknown',
             'text' => self::nullableStr(self::path($m, 'text', 'body'))
                 ?? self::nullableStr(self::path($m, 'button', 'text'))
                 ?? self::nullableStr(self::path($m, 'interactive', 'name')),
             'button_id' => self::nullableStr(self::path($m, 'interactive', 'button_reply', 'id'))
                 ?? self::nullableStr(self::path($m, 'interactive', 'list_reply', 'id'))
                 ?? self::nullableStr(self::path($m, 'button', 'payload')),
-            'template_name' => self::nullableStr(self::path($m, 'template', 'name')),
-            'template_lang' => self::nullableStr(self::path($m, 'template', 'language', 'code')),
+            'template_name' => self::nullableStr(self::path($m, 'template', 'name'), 255),
+            'template_lang' => self::nullableStr(self::path($m, 'template', 'language', 'code'), 10),
             'sent_at' => self::ts($m['timestamp'] ?? null),
             'raw' => $m,
         ];
@@ -110,7 +110,7 @@ class WebhookParser
         $s = self::arr($raw);
         $phone = WaContact::digitsOnly(self::str($s['recipient_id'] ?? null));
 
-        if ($phone === '') {
+        if (!WaContact::isDialable($phone)) {
             return null;
         }
 
@@ -118,9 +118,9 @@ class WebhookParser
             'kind' => 'status',
             'meta_id' => self::nullableStr($s['id'] ?? null, 128),
             'phone' => $phone,
-            'status' => self::str($s['status'] ?? null) ?: 'unknown',
+            'status' => self::str($s['status'] ?? null, 24) ?: 'unknown',
             'error_code' => self::nullableStr(self::path($s, 'errors', 0, 'code'), 12),
-            'error_title' => self::nullableStr(self::path($s, 'errors', 0, 'title')),
+            'error_title' => self::nullableStr(self::path($s, 'errors', 0, 'title'), 255),
             'status_at' => self::ts($s['timestamp'] ?? null),
             'raw' => $s,
         ];

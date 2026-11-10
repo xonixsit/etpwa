@@ -2446,7 +2446,12 @@ mis-filed echo able to re-parent a row at all):
 
         return $row;
     }
+```
 
+`applyStatus()` is the other half of the same rule and its own replacement, because the file keeps
+`findByMetaId()` and the `RANK` / `TERMINAL` / `mayReplaceStatus()` block between the two writers:
+
+```php
     public function applyStatus(string $status, CarbonInterface $at, ?string $code = null, ?string $title = null): void
     {
         if ($this->direction === self::IN || !self::mayReplaceStatus($this->status, $status)) {
@@ -2580,14 +2585,15 @@ not apply to them:
         // R30. Meta does not order status callbacks, and record() is keyed on wamid: a delivered
         // that arrives after a failure is a duplicate of an older event, not a new state.
         $this->sentRow('wamid.R1', WaMessage::FAILED, '131047', 'Message undeliverable');
-        $failedAt = WaMessage::where('meta_id', 'wamid.R1')->value('status_at');
+        $failed = WaMessage::where('meta_id', 'wamid.R1')->firstOrFail();
+        $failedAt = $failed->status_at->toDateTimeString();
 
         ProcessInboundEvent::dispatchSync($this->statusItem('wamid.R1', 'delivered', now()->subHour()));
 
         $m = WaMessage::where('meta_id', 'wamid.R1')->firstOrFail();
         $this->assertSame(WaMessage::FAILED, $m->status);
         $this->assertSame('131047', $m->error_code);
-        $this->assertSame($failedAt, (string) $m->status_at, 'and it must not move the clock either');
+        $this->assertSame($failedAt, $m->status_at->toDateTimeString(), 'and it must not move the clock either');
     }
 
     public function test_a_second_record_cannot_downgrade_a_failed_row(): void
@@ -2648,8 +2654,7 @@ not apply to them:
         // The monotonic half of touchInbound(), which round 1 left untested: with the greaterThan
         // comparison deleted the whole suite still passed, and windowOpen() flipped true -> false.
         $c = WaContact::factory()->create(['phone' => '18479043315', 'last_inbound_at' => now()]);
-        $before = $c->last_inbound_at;
-        $item = $this->statusItem('wamid.R6', 'delivered', now());
+        $before = $c->last_inbound_at->toDateTimeString();
         $item = [
             'kind' => 'message', 'meta_id' => 'wamid.R6', 'phone' => '18479043315',
             'direction' => WaMessage::IN, 'type' => 'text', 'text' => 'late replay',
@@ -2659,7 +2664,7 @@ not apply to them:
 
         ProcessInboundEvent::dispatchSync($item);
 
-        $this->assertSame((string) $before, (string) $c->refresh()->last_inbound_at);
+        $this->assertSame($before, $c->refresh()->last_inbound_at->toDateTimeString());
         $this->assertTrue($c->windowOpen());
     }
 
@@ -2795,14 +2800,25 @@ php artisan test
 
 Expected: **14 passed** in the rows file and **16** in the parser file, and full suite **59 passed**
 (49 after round 1, plus 8 rows tests, plus 2 parser tests). Then prove each new guard is load-bearing
-by mutation, one at a time, restoring after each: `mayReplaceStatus()` returning `true` always (the
-R1/R2/R3/R4 tests must fail); the `direction === self::IN` checks removed (R4 and R8's neighbours
-fail); the error-field ternaries replaced by `$code`/`$title` (R5 fails); `MIN_EPOCH` back to `1` and
-the ceiling back to `4e10` (the parser's future test fails and `test_a_missing_or_absurd_timestamp_is
-_null_not_now` still passes -- it only covers the near side); `digitsOnly()` removed from the `$mine`
-line (the punctuation test fails); `greaterThan` removed from `touchInbound()` (R6 fails); the
-ownership check removed (R8 fails). Any mutation that leaves the suite green is a test that does not
-test anything -- report it rather than shipping it.
+by mutation, one at a time, restoring and re-running after each (the `wamid` letters below are the
+test that must fail):
+
+- `mayReplaceStatus()` returning `true` unconditionally -> R1, R2, R3 fail.
+- `mayReplaceStatus()` returning `false` unconditionally -> R5 fails, and round 1's
+  `test_status_maps_onto_the_sent_row_and_never_moves_backwards` fails (so the rule cannot be a
+  blanket "never write").
+- the `direction === self::IN` checks deleted from `record()` and `applyStatus()` -> R4 fails.
+- the `'error_code' => $terminal ? … : null` ternaries replaced with `$code` / `$title` -> R5 fails.
+- `MIN_EPOCH` back to `1` and the ceiling back to `4e10` -> the parser's future-timestamp test fails.
+  `test_a_missing_or_absurd_timestamp_is_null_not_now` keeps passing under this one: it only covers
+  the near side, which is exactly the gap R31 is about.
+- `digitsOnly()` removed from the `$mine` line -> the punctuation test fails.
+- `greaterThan` removed from `touchInbound()` -> R6 fails (round 1 shipped this mutation unnoticed).
+- the ownership check removed from the job's `status()` -> R8 fails.
+- the `if ($item['sent_at'] !== null)` guard removed -> R7 fails.
+
+Any mutation that leaves the suite green is a test that does not test anything -- report it rather
+than shipping it.
 
 - [ ] **Step 10: Commit round 2**
 

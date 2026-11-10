@@ -1175,7 +1175,7 @@ class WebhookParser
                 $value = self::arr(self::arr($change)['value'] ?? null);
                 $numberId = self::str(self::path($value, 'metadata', 'phone_number_id'), 64);
 
-                if ($numberId !== $phoneId) {
+                if ($phoneId === '' || $numberId !== $phoneId) {
                     if ($seen === null && $numberId !== '') {
                         $seen = $numberId;
                     }
@@ -1307,7 +1307,7 @@ class WebhookParser
     /**
      * Ints and floats count as strings here on purpose: Meta sends
      * `errors[0].code` as a JSON number, and `str()` rejecting it would silently
-     * lose every delivery failure code — the one field the inbox most needs.
+     * lose every delivery failure code -- the one field the inbox most needs.
      * Anything else (array, bool, null, object) becomes ''.
      */
     private static function str(mixed $value, int $max = 0): string
@@ -1685,8 +1685,35 @@ class WebhookParserTest extends TestCase
         $this->assertSame('in', $parsed['items'][0]['direction']);
         $this->assertSame('12242144261', $parsed['items'][0]['phone']);
     }
+
+    public function test_an_unconfigured_phone_id_matches_no_callback_at_all(): void
+    {
+        // Deliberately not bodyOf(): this callback carries no metadata at all,
+        // which is what made an unset WA_PHONE_ID compare equal to it.
+        $body = ['entry' => [['id' => '1', 'changes' => [['field' => 'messages', 'value' => [
+            'messages' => [['from' => '15550001111', 'id' => 'wamid.FOREIGN',
+                'type' => 'text', 'text' => ['body' => 'not ours']]],
+        ]]]]]];
+
+        $this->assertSame([], WebhookParser::parse($body, '')['items']);
+        $this->assertFalse(WebhookParser::parse($body, '')['matched']);
+        $this->assertFalse(WebhookParser::parse($body, self::OURS)['matched']);
+
+        // Control: the guard must not cost us real callbacks.
+        $this->assertTrue(WebhookParser::parse($this->bodyOf([
+            'messages' => [['from' => '18479043315', 'id' => 'wamid.MINE', 'text' => ['body' => 'hi']]],
+        ]), self::OURS)['matched']);
+    }
 }
 ```
+
+`test_an_unconfigured_phone_id_matches_no_callback_at_all` is Ruling R25, found by the Round 4
+implementer and reproduced by the controller: normalising `phone_number_id` to `''` made "our
+configured id" and "a callback with no `metadata`" compare **equal**, so with `WA_PHONE_ID` unset
+every metadata-less callback matched and got dispatched as ours (pre-R24 it fell through
+`!is_string($numberId)` and was ignored). The match now requires a non-empty configured id.
+Same shape as R19's empty-challenge refusal and `verify()`'s `$token === ''` check: **an unset
+credential must never be satisfiable by an absent value.**
 
 The last two tests are the `WA_MY_NUMBER` half of R24. Direction came from
 `($m['from'] ?? null) === config('whatsapp.my_number')`, and `config()` is `''` when the key is
@@ -1704,7 +1731,7 @@ live callback.
 php artisan test tests/Feature/WebhookIngestTest.php tests/Feature/WebhookParserTest.php
 ```
 
-Expected: **17 passed** (7 ingest + 10 parser). Full suite: **37 passed**.
+Expected: **18 passed** (7 ingest + 11 parser). Full suite: **38 passed**.
 
 - [ ] **Step 10: Commit**
 

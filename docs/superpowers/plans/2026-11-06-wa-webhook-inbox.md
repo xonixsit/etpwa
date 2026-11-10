@@ -1083,6 +1083,25 @@ class WebhookIngestTest extends TestCase
         $this->assertSame(WaWebhookEvent::STORED, WaWebhookEvent::first()->status);
         $this->assertNull(WaWebhookEvent::first()->entry_id);
     }
+
+    public function test_a_hostile_timestamp_is_stored_as_null_instead_of_500ing()
+    {
+        // Ruling R26. The unit test in WebhookParserTest covers the mechanism; this is the
+        // HTTP-level half of the promise, because the whole class of outage is "a 500 to a
+        // correctly signed callback". R24's shape normalisation cannot see it: this value is
+        // a number, in an array, at the right key -- and past ~1e14 Carbon throws while the
+        // (int) cast of a float above PHP_INT_MAX is undefined. Reverting ts()'s bounds to
+        // `is_numeric && > 0` makes this answer 500.
+        $raw = str_replace('"timestamp":"1793996000"', '"timestamp":1e30',
+            file_get_contents(base_path('tests/Fixtures/inbound_text.json')));
+
+        $this->postCallback($raw)->assertOk()->assertContent('');
+        $this->assertSame(WaWebhookEvent::STORED, WaWebhookEvent::first()->status);
+
+        $message = collect(WaWebhookEvent::first()->changes)->firstWhere('kind', 'message');
+        $this->assertNotNull($message);
+        $this->assertNull($message['sent_at']);
+    }
 }
 ```
 
@@ -1333,11 +1352,13 @@ class WebhookParser
      * The ceiling is not cosmetic. Carbon::createFromTimestamp throws
      * InvalidFormatException from roughly 1e14 upwards, and an uncaught throw here is a
      * 500 -- so a signed body carrying `"timestamp":1e30` would drop the subscription.
-     * 4e10 is year 3237: far above any real callback, far below the throw.
+     * 4e10 is year 3237: far above any real callback, far below the throw. The floor is
+     * `1`, not `0`, because the (int) cast turns a sub-second fraction into epoch 0,
+     * which would be an invented 1970 date rather than the null Task 5 coalesces.
      */
     private static function ts(mixed $epoch): ?CarbonInterface
     {
-        if (!is_numeric($epoch) || $epoch <= 0 || $epoch > 4e10) {
+        if (!is_numeric($epoch) || $epoch < 1 || $epoch > 4e10) {
             return null;
         }
 
@@ -1450,11 +1471,15 @@ not sufficient on its own: a value can be perfectly well-shaped and still make t
 upwards (measured: `4e10` → year 3237 and `1e11` → year 5138 both succeed, `1e14`, `2e14`, `1e30`
 and the numeric string `'99999999999999999999'` all throw), and that throw escapes `ts()` through
 `parse()` into a **500** — verified end-to-end through a correctly signed POST before the fix. So
-`ts()` bounds the epoch (`$epoch > 4e10` → null) rather than catching around it: 4e10 is year 3237,
-far above any timestamp Meta will ever send and far below the threshold where Carbon throws. The
-same reasoning applies to any other place in this app that converts external input into a typed
-object — bound the accepted range at the reader; a `try/catch` would keep the 500 reachable from
-whatever the next unforeseen value turns out to be.
+`ts()` bounds the epoch on **both** sides (`$epoch < 1 || $epoch > 4e10` → null) rather than
+catching around it: 4e10 is year 3237, far above any timestamp Meta will ever send and far below the
+threshold where Carbon throws; the floor is `1` rather than `0` because the `(int)` cast turns a
+sub-second fraction into epoch 0, which would store an invented 1970 date instead of the null Task 5
+coalesces. The same reasoning applies to any other place in this app that converts external input
+into a typed object — bound the accepted range at the reader; a `try/catch` would keep the 500
+reachable from whatever the next unforeseen value turns out to be. Two tests carry it: the unit case
+in `WebhookParserTest` covers the mechanism, and `test_a_hostile_timestamp_is_stored_as_null_instead_of_500ing`
+in `WebhookIngestTest` holds the promise at the HTTP boundary, where it actually matters.
 
 Add the imports at the top of the controller: `use App\Support\WebhookParser;`, `use App\Support\WebhookSignature;`, `use App\Models\WaWebhookEvent;`.
 
@@ -1670,6 +1695,7 @@ class WebhookParserTest extends TestCase
                 ['id' => 'wamid.T4', 'from' => '18479043315', 'timestamp' => 1e30, 'text' => ['body' => 'hi']],
                 ['id' => 'wamid.T5', 'from' => '18479043315', 'timestamp' => '99999999999999999999',
                     'text' => ['body' => 'hi']],
+                ['id' => 'wamid.T7', 'from' => '18479043315', 'timestamp' => 0.5, 'text' => ['body' => 'hi']],
             ],
             'statuses' => [
                 ['id' => 'wamid.T6', 'recipient_id' => '18479043315', 'status' => 'delivered',
@@ -1677,13 +1703,14 @@ class WebhookParserTest extends TestCase
             ],
         ]), self::OURS);
 
-        $this->assertCount(6, $parsed['items']);
+        $this->assertCount(7, $parsed['items']);
         $this->assertNull($parsed['items'][0]['sent_at']);
         $this->assertNull($parsed['items'][1]['sent_at']);
         $this->assertNull($parsed['items'][2]['sent_at']);
         $this->assertNull($parsed['items'][3]['sent_at']);
         $this->assertNull($parsed['items'][4]['sent_at']);
-        $this->assertNull($parsed['items'][5]['status_at']);
+        $this->assertNull($parsed['items'][5]['sent_at']);
+        $this->assertNull($parsed['items'][6]['status_at']);
     }
 
     public function test_message_from_our_own_number_is_outbound_and_attributed_to_the_recipient(): void
@@ -1764,7 +1791,7 @@ live callback.
 php artisan test tests/Feature/WebhookIngestTest.php tests/Feature/WebhookParserTest.php
 ```
 
-Expected: **18 passed** (7 ingest + 11 parser). Full suite: **38 passed**.
+Expected: **19 passed** (8 ingest + 11 parser). Full suite: **39 passed**.
 
 - [ ] **Step 10: Commit**
 

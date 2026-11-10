@@ -92,4 +92,23 @@ class WebhookIngestTest extends TestCase
         $this->assertSame(WaWebhookEvent::STORED, WaWebhookEvent::first()->status);
         $this->assertNull(WaWebhookEvent::first()->entry_id);
     }
+
+    public function test_a_hostile_timestamp_is_stored_as_null_instead_of_500ing()
+    {
+        // Ruling R26. The unit test in WebhookParserTest covers the mechanism; this is the
+        // HTTP-level half of the promise, because the whole class of outage is "a 500 to a
+        // correctly signed callback". R24's shape normalisation cannot see it: this value is
+        // a number, in an array, at the right key -- and past ~1e14 Carbon throws while the
+        // (int) cast of a float above PHP_INT_MAX is undefined. Reverting ts()'s bounds to
+        // `is_numeric && > 0` makes this answer 500.
+        $raw = str_replace('"timestamp":"1793996000"', '"timestamp":1e30',
+            file_get_contents(base_path('tests/Fixtures/inbound_text.json')));
+
+        $this->postCallback($raw)->assertOk()->assertContent('');
+        $this->assertSame(WaWebhookEvent::STORED, WaWebhookEvent::first()->status);
+
+        $message = collect(WaWebhookEvent::first()->changes)->firstWhere('kind', 'message');
+        $this->assertNotNull($message);
+        $this->assertNull($message['sent_at']);
+    }
 }

@@ -187,11 +187,13 @@ class WebhookParser
      * The ceiling is not cosmetic. Carbon::createFromTimestamp throws
      * InvalidFormatException from roughly 1e14 upwards, and an uncaught throw here is a
      * 500 -- so a signed body carrying `"timestamp":1e30` would drop the subscription.
-     * 4e10 is year 3237: far above any real callback, far below the throw.
+     * 4e10 is year 3237: far above any real callback, far below the throw. The floor is
+     * `1`, not `0`, because the (int) cast turns a sub-second fraction into epoch 0,
+     * which would be an invented 1970 date rather than the null Task 5 coalesces.
      */
     private static function ts(mixed $epoch): ?CarbonInterface
     {
-        if (!is_numeric($epoch) || $epoch <= 0 || $epoch > 4e10) {
+        if (!is_numeric($epoch) || $epoch < 1 || $epoch > 4e10) {
             return null;
         }
 

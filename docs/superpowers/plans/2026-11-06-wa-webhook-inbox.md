@@ -936,6 +936,9 @@ use App\Http\Controllers\WaWebhookController;
 Route::get('/wa/webhook', [WaWebhookController::class, 'verify'])->name('wa.webhook.verify');
 ```
 
+Task 4 adds `->withoutMiddleware('web')` to this line under Ruling R22; leave it out here,
+where nothing has yet established that the route needs to be stateless.
+
 - [ ] **Step 9: Run both test files**
 
 ```bash
@@ -1007,7 +1010,7 @@ class WebhookIngestTest extends TestCase
         ]);
     }
 
-    private function post(string $raw, ?string $sig = 'bad')
+    private function postCallback(string $raw, ?string $sig = 'bad')
     {
         if ($sig === 'bad') {
             $sig = 'sha256=' . hash_hmac('sha256', $raw, 'appsecret-test');
@@ -1020,7 +1023,7 @@ class WebhookIngestTest extends TestCase
     public function test_valid_signature_returns_200_and_stores_one_event()
     {
         $raw = file_get_contents(base_path('tests/Fixtures/inbound_text.json'));
-        $this->post($raw)->assertOk()->assertContent('');
+        $this->postCallback($raw)->assertOk()->assertContent('');
         $this->assertCount(1, WaWebhookEvent::all());
         $this->assertSame(WaWebhookEvent::STORED, WaWebhookEvent::first()->status);
     }
@@ -1028,7 +1031,7 @@ class WebhookIngestTest extends TestCase
     public function test_bad_signature_is_403_and_stores_nothing()
     {
         $raw = file_get_contents(base_path('tests/Fixtures/inbound_text.json'));
-        $this->post($raw, 'sha256=' . str_repeat('0', 64))->assertForbidden();
+        $this->postCallback($raw, 'sha256=' . str_repeat('0', 64))->assertForbidden();
         $this->assertSame(0, WaWebhookEvent::count());
     }
 
@@ -1043,8 +1046,8 @@ class WebhookIngestTest extends TestCase
     public function test_identical_replay_gets_its_own_row_marked_duplicate_and_is_not_reprocessed()
     {
         $raw = file_get_contents(base_path('tests/Fixtures/inbound_text.json'));
-        $this->post($raw);
-        $this->post(file_get_contents(base_path('tests/Fixtures/replayed_inbound.json')));
+        $this->postCallback($raw);
+        $this->postCallback(file_get_contents(base_path('tests/Fixtures/replayed_inbound.json')));
 
         $this->assertSame(2, WaWebhookEvent::count());
         $this->assertSame(WaWebhookEvent::STORED, WaWebhookEvent::orderBy('id')->value('status'));
@@ -1054,13 +1057,13 @@ class WebhookIngestTest extends TestCase
     public function test_payload_for_another_phone_number_is_ignored()
     {
         $raw = file_get_contents(base_path('tests/Fixtures/other_phone_number.json'));
-        $this->post($raw)->assertOk();
+        $this->postCallback($raw)->assertOk();
         $this->assertSame(WaWebhookEvent::IGNORED, WaWebhookEvent::first()->status);
     }
 
     public function test_unparseable_json_returns_200_and_is_ignored()
     {
-        $this->post('not json at all')->assertOk();
+        $this->postCallback('not json at all')->assertOk();
         $this->assertSame(WaWebhookEvent::IGNORED, WaWebhookEvent::first()->status);
     }
 }
@@ -1279,13 +1282,45 @@ class WebhookParser
 
 Add the imports at the top of the controller: `use App\Support\WebhookParser;`, `use App\Support\WebhookSignature;`, `use App\Models\WaWebhookEvent;`.
 
-Register the route in `routes/web.php`:
+Register the routes in `routes/web.php` — the POST beside the existing GET, and both with the
+browser middleware group taken off (Ruling R20 as corrected by Ruling R22). `/wa/webhook` is
+called by Meta with no cookie, and `.env` runs `SESSION_DRIVER=database`, so today every
+unauthenticated callback inserts a row into `sessions` (measured: one row per GET, plus an
+`XSRF-TOKEN` cookie on the response). Growth is the minor half of the problem: if the deployed
+database has no `sessions` table, each callback throws, Meta retries, and after repeated
+failures **drops the webhook subscription** — total loss of the feature for a reason unrelated
+to this plan's code.
+
+Write both route lines as:
 
 ```php
-Route::post('/wa/webhook', [WaWebhookController::class, 'ingest'])->name('wa.webhook.ingest');
+Route::get('/wa/webhook', [WaWebhookController::class, 'verify'])
+    ->withoutMiddleware('web')
+    ->name('wa.webhook.verify');
+
+Route::post('/wa/webhook', [WaWebhookController::class, 'ingest'])
+    ->withoutMiddleware('web')
+    ->name('wa.webhook.ingest');
 ```
 
-and exempt both machine paths from CSRF in `bootstrap/app.php`, changing the `withMiddleware` closure to:
+`withoutMiddleware('web')` drops the whole group, because two different members of it touch the
+session and each one 500s on its own: `ShareErrorsFromSession@handle` calls
+`$request->session()->get('errors')`, and `VerifyCsrfToken@newCookie` — reached even for a
+request that `inExceptArray()` already let through — calls `$request->session()->token()`.
+Excluding only `StartSession` gives a 500; excluding `StartSession` *and*
+`ShareErrorsFromSession` still gives a 500 with `RuntimeException: Session store not set on
+request.` at `Illuminate/Http/Request.php:612`. Enumerating the session-using classes is the
+brittle fix: it has to be re-derived every time Laravel reshuffles the group. Dropping `'web'`
+is what Ruling R22 chose after measuring all four variants.
+
+Do not strip the group application-wide (no `Middleware::web(remove:)`): the staff login and
+inbox in Tasks 9 and 11 need sessions. No test covers this — `phpunit.xml` pins
+`SESSION_DRIVER=array`, so a "no session row was written" assertion could only pass vacuously;
+the ruling was verified with a throwaway probe that forced `session.driver = database` and
+counted `sessions` rows (result: 200, zero rows, no `Set-Cookie`, challenge still echoed).
+
+Also exempt both machine paths from CSRF in `bootstrap/app.php`, changing the `withMiddleware`
+closure to:
 
 ```php
     ->withMiddleware(function (Middleware $middleware): void {
@@ -1295,6 +1330,12 @@ and exempt both machine paths from CSRF in `bootstrap/app.php`, changing the `wi
         ]);
     })
 ```
+
+With `withoutMiddleware('web')` on the routes, `ValidateCsrfToken` is not in their pipeline at
+all, so this except list is a second lock rather than the mechanism. Keep it anyway: the
+failure it guards against — a `419` on Meta's `POST`, Meta retrying, Meta dropping the
+subscription — costs two lines of config to insure against, and if a later task ever puts
+these paths back under `web`, the machine endpoints are the ones that must stay reachable.
 
 - [ ] **Step 8: Run the test**
 
@@ -2520,8 +2561,12 @@ use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\WaWebhookController;
 use Illuminate\Support\Facades\Route;
 
-Route::get('/wa/webhook', [WaWebhookController::class, 'verify'])->name('wa.webhook.verify');
-Route::post('/wa/webhook', [WaWebhookController::class, 'ingest'])->name('wa.webhook.ingest');
+Route::get('/wa/webhook', [WaWebhookController::class, 'verify'])
+    ->withoutMiddleware('web')
+    ->name('wa.webhook.verify');
+Route::post('/wa/webhook', [WaWebhookController::class, 'ingest'])
+    ->withoutMiddleware('web')
+    ->name('wa.webhook.ingest');
 
 Route::get('/login', [LoginController::class, 'show'])->name('login');
 Route::post('/login', [LoginController::class, 'store']);
@@ -2763,10 +2808,19 @@ class MachineController extends Controller
 
 ```php
 Route::middleware('wa.bearer')->group(function () {
-    Route::get('/wa/suppressions', [MachineController::class, 'suppressions'])->name('wa.suppressions');
-    Route::post('/inbound/record-send', [MachineController::class, 'recordSend'])->name('wa.record_send');
+    Route::get('/wa/suppressions', [MachineController::class, 'suppressions'])
+        ->withoutMiddleware('web')
+        ->name('wa.suppressions');
+    Route::post('/inbound/record-send', [MachineController::class, 'recordSend'])
+        ->withoutMiddleware('web')
+        ->name('wa.record_send');
 });
 ```
+
+Same reasoning as Ruling R22 on the webhook: the bench calls these with a bearer token and no
+cookie, so they must not mint `sessions` rows or carry an `XSRF-TOKEN`. `withoutMiddleware` is
+a **per-route** method — `Illuminate\Routing\Router` has no group-level version (`Route.php:1173`
+is the only relevant declaration), so it goes on each route inside the group, not on the group.
 
 In `bootstrap/app.php`, inside `withMiddleware`, add:
 

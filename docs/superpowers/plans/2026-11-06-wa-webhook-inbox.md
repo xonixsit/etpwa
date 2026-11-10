@@ -1135,6 +1135,14 @@ php artisan migrate:fresh --force
 
 - [ ] **Step 6: Implement `app/Support/WebhookParser.php`**
 
+Ruling R24: **every read of the decoded body goes through four normalising helpers, and no
+body shape can reach a typed parameter or a `foreach` unnormalised.** The earlier version of
+this file checked `is_string` in one place and cast in another, and a throwaway probe against
+the committed controller proved five of six hostile shapes answered 500 — array
+`phone_number_id`, scalar `entry`, scalar `changes`, scalar message element, array `wa_id`.
+Only array `text.body` survived, by accident. See the R24 paragraph after Step 7 for the
+evidence and for why normalising at the boundary beats patching the next leak.
+
 ```php
 <?php
 
@@ -1147,100 +1155,200 @@ use Carbon\CarbonInterface;
 class WebhookParser
 {
     /**
-     * @return array{matched: bool, phone_number_id: ?string, items: array<int, array<string, mixed>>}
+     * @return array{matched: bool, entry_id: ?string, phone_number_id: ?string, items: array<int, array<string, mixed>>}
      */
     public static function parse(array $payload, string $phoneId): array
     {
         $items = [];
         $matched = false;
         $seen = null;
+        $entryId = null;
 
-        foreach ($payload['entry'] ?? [] as $entry) {
-            foreach ($entry['changes'] ?? [] as $change) {
-                $value = $change['value'] ?? [];
-                $numberId = $value['metadata']['phone_number_id'] ?? null;
-                if (!is_string($numberId) || $numberId !== $phoneId) {
-                    $seen = $seen ?? $numberId;
+        foreach (self::arr($payload['entry'] ?? null) as $entry) {
+            $entry = self::arr($entry);
+
+            if ($entryId === null) {
+                $entryId = self::nullableStr($entry['id'] ?? null, 64);
+            }
+
+            foreach (self::arr($entry['changes'] ?? null) as $change) {
+                $value = self::arr(self::arr($change)['value'] ?? null);
+                $numberId = self::str(self::path($value, 'metadata', 'phone_number_id'), 64);
+
+                if ($numberId !== $phoneId) {
+                    if ($seen === null && $numberId !== '') {
+                        $seen = $numberId;
+                    }
+
                     continue;
                 }
+
                 $matched = true;
 
-                foreach ($value['contacts'] ?? [] as $contact) {
-                    $phone = WaContact::digitsOnly($contact['wa_id'] ?? '');
-                    $name = $contact['profile']['name'] ?? null;
-                    if ($phone !== '' && is_string($name) && $name !== '') {
-                        $items[] = ['kind' => 'profile', 'phone' => $phone, 'name' => $name, 'raw' => $contact];
-                    }
+                foreach (self::arr($value['contacts'] ?? null) as $contact) {
+                    $items[] = self::profile($contact);
                 }
 
-                foreach ($value['messages'] ?? [] as $message) {
+                foreach (self::arr($value['messages'] ?? null) as $message) {
                     $items[] = self::message($message);
                 }
 
-                foreach ($value['statuses'] ?? [] as $status) {
+                foreach (self::arr($value['statuses'] ?? null) as $status) {
                     $items[] = self::status($status);
                 }
             }
         }
 
-        $items = array_values(array_filter($items));
-
-        return ['matched' => $matched, 'phone_number_id' => $seen, 'items' => $items];
+        return [
+            'matched' => $matched,
+            'entry_id' => $entryId,
+            'phone_number_id' => $seen,
+            'items' => array_values(array_filter($items)),
+        ];
     }
 
-    private static function message(array $m): array
+    private static function profile(mixed $raw): ?array
     {
-        $phone = WaContact::digitsOnly(
-            ($m['from'] ?? null) === config('whatsapp.my_number') ? ($m['to'] ?? '') : ($m['from'] ?? '')
-        );
+        $contact = self::arr($raw);
+        $phone = WaContact::digitsOnly(self::str($contact['wa_id'] ?? null));
+        $name = self::nullableStr(self::path($contact, 'profile', 'name'));
+
+        if ($phone === '' || $name === null) {
+            return null;
+        }
+
+        return ['kind' => 'profile', 'phone' => $phone, 'name' => $name, 'raw' => $contact];
+    }
+
+    private static function message(mixed $raw): ?array
+    {
+        $m = self::arr($raw);
+        $mine = self::str(config('whatsapp.my_number'));
+        $from = self::str($m['from'] ?? null);
+        $isOut = $mine !== '' && $from === $mine;
+        $phone = WaContact::digitsOnly($isOut ? self::str($m['to'] ?? null) : $from);
+
+        if ($phone === '') {
+            return null;
+        }
 
         return [
             'kind' => 'message',
-            'meta_id' => $m['id'] ?? null,
+            'meta_id' => self::nullableStr($m['id'] ?? null, 128),
             'phone' => $phone,
-            'direction' => ($m['from'] ?? null) === config('whatsapp.my_number')
-                ? \App\Models\WaMessage::OUT : \App\Models\WaMessage::IN,
-            'type' => $m['type'] ?? 'unknown',
-            'text' => $m['text']['body'] ?? $m['button']['text'] ?? $m['interactive']['name'] ?? null,
-            'button_id' => $m['interactive']['button_reply']['id']
-                ?? $m['interactive']['list_reply']['id']
-                ?? $m['button']['payload'] ?? null,
-            'template_name' => $m['template']['name'] ?? null,
-            'template_lang' => $m['template']['language']['code'] ?? null,
+            'direction' => $isOut ? \App\Models\WaMessage::OUT : \App\Models\WaMessage::IN,
+            'type' => self::str($m['type'] ?? null) ?: 'unknown',
+            'text' => self::nullableStr(self::path($m, 'text', 'body'))
+                ?? self::nullableStr(self::path($m, 'button', 'text'))
+                ?? self::nullableStr(self::path($m, 'interactive', 'name')),
+            'button_id' => self::nullableStr(self::path($m, 'interactive', 'button_reply', 'id'))
+                ?? self::nullableStr(self::path($m, 'interactive', 'list_reply', 'id'))
+                ?? self::nullableStr(self::path($m, 'button', 'payload')),
+            'template_name' => self::nullableStr(self::path($m, 'template', 'name')),
+            'template_lang' => self::nullableStr(self::path($m, 'template', 'language', 'code')),
             'sent_at' => self::ts($m['timestamp'] ?? null),
             'raw' => $m,
         ];
     }
 
-    private static function status(array $s): array
+    private static function status(mixed $raw): ?array
     {
+        $s = self::arr($raw);
+        $phone = WaContact::digitsOnly(self::str($s['recipient_id'] ?? null));
+
+        if ($phone === '') {
+            return null;
+        }
+
         return [
             'kind' => 'status',
-            'meta_id' => $s['id'] ?? null,
-            'phone' => WaContact::digitsOnly($s['recipient_id'] ?? ''),
-            'status' => $s['status'] ?? 'unknown',
-            'error_code' => isset($s['errors'][0]['code']) ? (string) $s['errors'][0]['code'] : null,
-            'error_title' => isset($s['errors'][0]['title']) ? (string) $s['errors'][0]['title'] : null,
+            'meta_id' => self::nullableStr($s['id'] ?? null, 128),
+            'phone' => $phone,
+            'status' => self::str($s['status'] ?? null) ?: 'unknown',
+            'error_code' => self::nullableStr(self::path($s, 'errors', 0, 'code'), 12),
+            'error_title' => self::nullableStr(self::path($s, 'errors', 0, 'title')),
             'status_at' => self::ts($s['timestamp'] ?? null),
             'raw' => $s,
         ];
     }
 
-    private static function ts(mixed $epoch): CarbonInterface
+    /**
+     * List into an array, or nothing at all. A scalar where Meta puts a list is not
+     * a callback we can walk: foreach over it is a Warning, and Laravel turns
+     * Warnings into ErrorException, which is a 500 and therefore a dropped
+     * subscription.
+     */
+    private static function arr(mixed $value): array
     {
-        return is_numeric($epoch)
+        return is_array($value) ? $value : [];
+    }
+
+    /**
+     * Read a nested key without ever offsetting a scalar. `text` arriving as the
+     * string "hi" makes `$m['text']['body']` a Warning in PHP 8, so nested reads
+     * have to stop as soon as a level is not an array. Keys may be ints because
+     * `errors` is a list.
+     */
+    private static function path(array $row, string|int ...$keys): mixed
+    {
+        $cursor = $row;
+
+        foreach ($keys as $key) {
+            if (!is_array($cursor) || !array_key_exists($key, $cursor)) {
+                return null;
+            }
+
+            $cursor = $cursor[$key];
+        }
+
+        return $cursor;
+    }
+
+    /**
+     * Ints and floats count as strings here on purpose: Meta sends
+     * `errors[0].code` as a JSON number, and `str()` rejecting it would silently
+     * lose every delivery failure code — the one field the inbox most needs.
+     * Anything else (array, bool, null, object) becomes ''.
+     */
+    private static function str(mixed $value, int $max = 0): string
+    {
+        $out = is_string($value) || is_numeric($value) ? (string) $value : '';
+
+        return $max > 0 ? mb_substr($out, 0, $max) : $out;
+    }
+
+    private static function nullableStr(mixed $value, int $max = 0): ?string
+    {
+        $out = self::str($value, $max);
+
+        return $out === '' ? null : $out;
+    }
+
+    /**
+     * Null, not `now()`: a callback with no usable timestamp does not get to invent
+     * one, because Task 5 would then have no way to tell "Meta said when" from "we
+     * guessed". Consumers coalesce (`$item['sent_at'] ?? now()`); wa_messages.sent_at
+     * is NOT NULL with useCurrent, so the fallback belongs at the write, not here.
+     */
+    private static function ts(mixed $epoch): ?CarbonInterface
+    {
+        return is_numeric($epoch) && $epoch > 0
             ? Carbon::createFromTimestamp((int) $epoch, 'UTC')
-            : now();
+            : null;
     }
 }
 ```
 
-`Carbon::createFromTimestamp` rather than `Carbon::parse`, because Meta's `timestamp` is a Unix integer.
+Two contract changes later tasks must know about: `parse()` now also returns `entry_id` (so the
+controller never touches the decoded body itself), and `sent_at`/`status_at` are nullable.
+`array_filter` is no longer dead code — the three per-item builders return `?array` and drop an
+item that has no usable phone number, which is what keeps a garbage element from becoming a
+`wa_contacts` row with an empty key in Task 5.
 
 - [ ] **Step 7: Add the POST branch to `WaWebhookController`** (replace the class body, keep `verify()` as-is and add the ingest method plus a protected seam that Task 5 fills in):
 
 ```php
-    public function ingest(Request $request)
+    public function ingest(Request $request): Response
     {
         $raw = $request->getContent();
         $secret = (string) config('whatsapp.app_secret', '');
@@ -1259,9 +1367,9 @@ class WebhookParser
 
         $parsed = WebhookParser::parse($payload, (string) config('whatsapp.phone_id', ''));
         $hash = hash('sha256', $raw);
-        $entryId = $this->stringOrNull($payload['entry'][0]['id'] ?? null);
         $ours = (string) config('whatsapp.phone_id', '');
         $numberFor = $parsed['matched'] ? $ours : $parsed['phone_number_id'];
+        $entryId = $parsed['entry_id'];
 
         if (WaWebhookEvent::seenBefore($hash)) {
             WaWebhookEvent::store($numberFor, $entryId, $parsed['items'],
@@ -1286,19 +1394,7 @@ class WebhookParser
         return $this->accepted();
     }
 
-    /**
-     * Same rule as param(), one step further along the request: anything we hand to a
-     * typed argument comes from a body Meta signs with our app secret, so a value that
-     * is not a string is not a format we recognise and must not be able to raise a
-     * TypeError. A TypeError is a 500, and a 500 on the POST is what makes Meta drop
-     * the subscription (Ruling R23).
-     */
-    private function stringOrNull(mixed $value): ?string
-    {
-        return is_string($value) ? $value : null;
-    }
-
-    private function accepted()
+    private function accepted(): Response
     {
         return response('', 200);
     }
@@ -1309,15 +1405,37 @@ class WebhookParser
     }
 ```
 
-Ruling R23 is the `stringOrNull()` guard on the entry id. Every other value handed to a typed
-parameter here is already stringly-typed by construction (`$hash`, `$ours`, `$parsed['items']`,
-and the parser's own `is_string` check on `phone_number_id`), but `entry[0]['id']` is read
-straight out of the decoded body. Without the guard, `{"entry":[{"id":["a","b"]}]}` correctly
-signed with the app secret raises `TypeError: WaWebhookEvent::store(): Argument #2 ($entryId)
-must be of type ?string, array given` and answers 500 — verified by mutation, so the test in
-Step 2 detects it rather than merely sitting beside it. Same principle as R17, applied one step
-further along the request: the shape of a callback must never be able to decide whether we stay
-subscribed.
+The controller reads **nothing** from `$payload` except the fact that it decoded to an array.
+Under Ruling R23 it grew a local `stringOrNull()` guard for `entry[0]['id']`; under R24 that
+read moved into `parse()` and the helper was deleted, because a per-call-site guard is the
+pattern that let five other leaks survive it.
+
+Ruling R24 (supersedes R23's scope). R23 was real but its justification — "every other value
+handed to a typed parameter is already stringly-typed by construction" — was false, and the
+whole plan should have been read as: **any value that arrives from the JSON body is untrusted
+in shape as well as in signature.** A throwaway probe against the committed controller, each
+body correctly signed, showed:
+
+| body mutation | committed | after R24 |
+|---|---|---|
+| `"entry": "x"` (list replaced by a scalar) | **500** | 200, `ignored` |
+| `"changes": "x"` | **500** | 200, `ignored` |
+| one message element is the string `"nope"` | **500** | 200, item dropped |
+| `"wa_id": [18479043315]` | **500** | 200, item dropped |
+| `"metadata": {"phone_number_id": {"x":1}}` | **500** | 200, `phone_number_id` null |
+| `"text": {"body": ["a","b"]}` | 200 (only by luck) | 200, `text` null |
+
+Three distinct mechanisms, all reachable from one signed callback: `foreach` over a scalar and
+array-offset reads on a scalar both raise an `E_WARNING`, which Laravel converts to
+`ErrorException`; and `WaContact::digitsOnly(?string)` / `WaWebhookEvent::store(?string …)`
+raise `TypeError` on an array. Each is a 500, and a 500 on the POST is what makes Meta retry and
+then drop the subscription — the same outage R22 was ruled to prevent, arriving through the
+request body instead of the session middleware. `WebhookParser` is now the single place that
+touches the decoded body, it normalises every read through `arr()` / `path()` / `str()` /
+`nullableStr()`, and the per-item builders return `?array` so an unusable element disappears
+instead of becoming a row. R17's rule ("treat a non-string as absent") and R19's ("never bare-cast
+request input") were both under-applied here; the generalised form is what Task 5 and Task 10
+must follow, not another local guard.
 
 Add the imports at the top of the controller: `use App\Support\WebhookParser;`, `use App\Support\WebhookSignature;`, `use App\Models\WaWebhookEvent;`.
 
@@ -1376,16 +1494,219 @@ failure it guards against — a `419` on Meta's `POST`, Meta retrying, Meta drop
 subscription — costs two lines of config to insure against, and if a later task ever puts
 these paths back under `web`, the machine endpoints are the ones that must stay reachable.
 
-- [ ] **Step 8: Run the test**
+- [ ] **Step 8: Add `tests/Feature/WebhookParserTest.php`**
 
-```bash
-php artisan test tests/Feature/WebhookIngestTest.php
+The ingest tests only ever see the parser through an HTTP status and a `status` column, which is
+why the parser could carry six shape leaks with a green suite. This file pins the contract itself
+so that a renamed or dropped key fails here instead of in Task 5. `WebhookParser` is a pure
+static, so no `RefreshDatabase` and no HTTP.
+
+```php
+<?php
+
+namespace Tests\Feature;
+
+use App\Support\WebhookParser;
+use Carbon\CarbonInterface;
+use Tests\TestCase;
+
+class WebhookParserTest extends TestCase
+{
+    private const OURS = '1427706937088002';
+
+    private function fixture(string $name): array
+    {
+        return json_decode(
+            file_get_contents(base_path('tests/Fixtures/' . $name)), true);
+    }
+
+    private function bodyOf(array $value): array
+    {
+        $value['metadata'] = ['phone_number_id' => self::OURS];
+
+        return ['entry' => [['id' => '1717463009877473', 'changes' => [
+            ['field' => 'messages', 'value' => $value],
+        ]]]];
+    }
+
+    public function test_inbound_text_fixture_yields_a_profile_item_then_a_message_item(): void
+    {
+        $parsed = WebhookParser::parse($this->fixture('inbound_text.json'), self::OURS);
+
+        $this->assertTrue($parsed['matched']);
+        $this->assertSame('1717463009877473', $parsed['entry_id']);
+        $this->assertNull($parsed['phone_number_id']);
+        $this->assertCount(2, $parsed['items']);
+
+        $this->assertSame('profile', $parsed['items'][0]['kind']);
+        $this->assertSame('18479043315', $parsed['items'][0]['phone']);
+        $this->assertSame('Jane Tester', $parsed['items'][0]['name']);
+
+        $message = $parsed['items'][1];
+        $this->assertSame('message', $message['kind']);
+        $this->assertSame('in', $message['direction']);
+        $this->assertSame('18479043315', $message['phone']);
+        $this->assertSame('wamid.INBOUND1', $message['meta_id']);
+        $this->assertSame('text', $message['type']);
+        $this->assertSame('Hello, is this E Tax Planner?', $message['text']);
+        $this->assertNull($message['button_id']);
+        $this->assertInstanceOf(CarbonInterface::class, $message['sent_at']);
+        $this->assertSame('2026-11-06 20:13:20', $message['sent_at']->copy()->timezone('UTC')->toDateTimeString());
+    }
+
+    public function test_status_fixture_yields_a_status_item(): void
+    {
+        $parsed = WebhookParser::parse($this->fixture('status_delivered.json'), self::OURS);
+
+        $this->assertTrue($parsed['matched']);
+        $this->assertCount(1, $parsed['items']);
+
+        $status = $parsed['items'][0];
+        $this->assertSame('status', $status['kind']);
+        $this->assertSame('wamid.OUT1', $status['meta_id']);
+        $this->assertSame('delivered', $status['status']);
+        $this->assertSame('18479043315', $status['phone']);
+        $this->assertNull($status['error_code']);
+        $this->assertNull($status['error_title']);
+        $this->assertInstanceOf(CarbonInterface::class, $status['status_at']);
+    }
+
+    public function test_callback_for_another_number_is_unmatched_and_reports_that_number(): void
+    {
+        $parsed = WebhookParser::parse($this->fixture('other_phone_number.json'), self::OURS);
+
+        $this->assertFalse($parsed['matched']);
+        $this->assertSame('9999999999999999', $parsed['phone_number_id']);
+        $this->assertSame('1717463009877473', $parsed['entry_id']);
+        $this->assertSame([], $parsed['items']);
+    }
+
+    public function test_non_string_ids_become_null_rather_than_reaching_a_typed_parameter(): void
+    {
+        $parsed = WebhookParser::parse([
+            'entry' => [['id' => ['a', 'b'], 'changes' => 'nope']],
+        ], self::OURS);
+
+        $this->assertFalse($parsed['matched']);
+        $this->assertNull($parsed['entry_id']);
+        $this->assertNull($parsed['phone_number_id']);
+        $this->assertSame([], $parsed['items']);
+    }
+
+    public function test_items_without_a_usable_phone_are_dropped_not_stored(): void
+    {
+        $parsed = WebhookParser::parse($this->bodyOf([
+            'contacts' => ['scalar', ['wa_id' => [18479043315], 'profile' => ['name' => 'X']],
+                ['wa_id' => '15550001111', 'profile' => ['name' => []]]],
+            'messages' => ['scalar', ['from' => [1, 2]], ['id' => 'wamid.NOPHONE']],
+            'statuses' => ['scalar', ['recipient_id' => ''], ['recipient_id' => null, 'status' => 'read']],
+        ]), self::OURS);
+
+        $this->assertTrue($parsed['matched']);
+        $this->assertSame([], $parsed['items']);
+    }
+
+    public function test_scalar_replacements_for_lists_and_nested_maps_are_survivable(): void
+    {
+        $cases = [
+            ['scalar entry list', ['entry' => 'scalar'], false, 0],
+            ['scalar changes list', ['entry' => [['changes' => 'scalar']]], false, 0],
+            ['scalar change value', ['entry' => [['changes' => [['value' => 'scalar']]]]], false, 0],
+            ['text is a string', $this->bodyOf([
+                'messages' => [['from' => '18479043315', 'text' => 'plain string']]]), true, 1],
+            ['template is a string', $this->bodyOf([
+                'messages' => [['from' => '18479043315', 'template' => 'scalar']]]), true, 1],
+            ['errors is a string', $this->bodyOf([
+                'statuses' => [['recipient_id' => '18479043315', 'errors' => 'scalar']]]), true, 1],
+        ];
+
+        foreach ($cases as [$label, $body, $expectMatched, $expectItems]) {
+            $parsed = WebhookParser::parse($body, self::OURS);
+
+            $this->assertSame($expectMatched, $parsed['matched'], $label);
+            $this->assertCount($expectItems, $parsed['items'], $label);
+        }
+    }
+
+    public function test_numeric_error_code_from_json_is_captured_as_a_string(): void
+    {
+        $parsed = WebhookParser::parse($this->bodyOf([
+            'statuses' => [['id' => 'wamid.OUT2', 'recipient_id' => '18479043315',
+                'status' => 'failed', 'errors' => [['code' => 131049, 'title' => 'Re-engagement message']]]],
+        ]), self::OURS);
+
+        $status = $parsed['items'][0];
+        $this->assertSame('131049', $status['error_code']);
+        $this->assertSame('Re-engagement message', $status['error_title']);
+        $this->assertSame('failed', $status['status']);
+    }
+
+    public function test_a_missing_or_absurd_timestamp_is_null_not_now(): void
+    {
+        $parsed = WebhookParser::parse($this->bodyOf([
+            'messages' => [['id' => 'wamid.T1', 'from' => '18479043315', 'text' => ['body' => 'hi']],
+                ['id' => 'wamid.T2', 'from' => '18479043315', 'timestamp' => -5, 'text' => ['body' => 'hi']]],
+        ]), self::OURS);
+
+        $this->assertCount(2, $parsed['items']);
+        $this->assertNull($parsed['items'][0]['sent_at']);
+        $this->assertNull($parsed['items'][1]['sent_at']);
+    }
+
+    public function test_message_from_our_own_number_is_outbound_and_attributed_to_the_recipient(): void
+    {
+        config(['whatsapp.my_number' => '12242144261']);
+
+        $parsed = WebhookParser::parse($this->bodyOf([
+            'messages' => [['id' => 'wamid.OUT3', 'from' => '12242144261', 'to' => '18479043315',
+                'type' => 'template', 'template' => ['name' => 'opener_brand', 'language' => ['code' => 'en_US']]]],
+        ]), self::OURS);
+
+        $message = $parsed['items'][0];
+        $this->assertSame('out', $message['direction']);
+        $this->assertSame('18479043315', $message['phone']);
+        $this->assertSame('opener_brand', $message['template_name']);
+        $this->assertSame('en_US', $message['template_lang']);
+    }
+
+    public function test_an_unconfigured_own_number_never_invents_an_outbound_row(): void
+    {
+        config(['whatsapp.my_number' => '']);
+
+        $parsed = WebhookParser::parse($this->bodyOf([
+            'messages' => [
+                ['id' => 'wamid.A', 'from' => '12242144261', 'to' => '18479043315',
+                    'text' => ['body' => 'hi']],
+                ['id' => 'wamid.B', 'to' => '18479043315', 'text' => ['body' => 'hi']],
+            ],
+        ]), self::OURS);
+
+        $this->assertCount(1, $parsed['items']);
+        $this->assertSame('in', $parsed['items'][0]['direction']);
+        $this->assertSame('12242144261', $parsed['items'][0]['phone']);
+    }
+}
 ```
 
-Expected: **7 passed** — the six this task's steps describe, plus the R23 entry-id guard. Full
-suite: **27 passed**.
+The last two tests are the `WA_MY_NUMBER` half of R24. Direction came from
+`($m['from'] ?? null) === config('whatsapp.my_number')`, and `config()` is `''` when the key is
+unset, so with `WA_MY_NUMBER` missing nothing was ever outbound and a message carrying only `to`
+became an item with an **empty phone** -- the row Task 5 would have tried to write into
+`wa_contacts.phone` (unique, varchar 20) as `''`. Two changes: the comparison is guarded by
+`$mine !== ''`, and a builder drops any item with no usable phone. The residual cost, stated
+plainly: while `WA_MY_NUMBER` is unset our own traffic is filed as inbound against our own number,
+which is visible and wrong rather than silently blank, and Task 16 sets the key before the first
+live callback.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 9: Run the tests**
+
+```bash
+php artisan test tests/Feature/WebhookIngestTest.php tests/Feature/WebhookParserTest.php
+```
+
+Expected: **17 passed** (7 ingest + 10 parser). Full suite: **37 passed**.
+
+- [ ] **Step 10: Commit**
 
 ```bash
 git add app database/migrations routes/web.php bootstrap/app.php tests
@@ -1557,9 +1878,7 @@ class ProcessInboundEvent implements ShouldQueue
     private function message(): void
     {
         $item = $this->item;
-        if ($item['phone'] === '') {
-            return;
-        }
+        $at = $item['sent_at'] ?? now();
 
         $contact = WaContact::fromPhone($item['phone']);
         $row = WaMessage::record([
@@ -1571,12 +1890,12 @@ class ProcessInboundEvent implements ShouldQueue
             'template_name' => $item['template_name'],
             'template_lang' => $item['template_lang'],
             'status' => $item['direction'] === WaMessage::IN ? WaMessage::INCOMING : null,
-            'sent_at' => $item['sent_at'],
+            'sent_at' => $at,
             'raw' => $item['raw'],
         ]);
 
         if ($item['direction'] === WaMessage::IN) {
-            $contact->touchInbound($item['sent_at']);
+            $contact->touchInbound($at);
             // Task 7 adds the automatic-response call here.
         }
     }
@@ -1588,10 +1907,21 @@ class ProcessInboundEvent implements ShouldQueue
         if ($row === null) {
             return;
         }
-        $row->applyStatus($item['status'], $item['status_at'], $item['error_code'], $item['error_title']);
+        $row->applyStatus($item['status'], $item['status_at'] ?? now(),
+            $item['error_code'], $item['error_title']);
     }
 }
 ```
+
+Ruling R24 changes what this job may assume, in both directions. `phone` is now guaranteed
+non-empty, so the old `if ($item['phone'] === '') return;` guard is gone -- the parser drops the
+item instead, and an assertion that cannot fail is worse than none. `sent_at` and `status_at` are
+now **nullable**, because the parser no longer invents `now()` for a callback that carried no
+timestamp; the job coalesces here rather than the parser deciding, and it has to:
+`wa_messages.sent_at` is `timestamp NOT NULL` with `useCurrent`. `meta_id` can also be null
+(`nullableStr`), and `WaMessage::findByMetaId()` already refuses `null` and `''` before querying
+(app/Models/WaMessage.php:54-60), so an id-less status is dropped rather than matching some other
+row whose `meta_id` is `NULL`.
 
 - [ ] **Step 4: Add the two model methods.** To `WaContact`:
 

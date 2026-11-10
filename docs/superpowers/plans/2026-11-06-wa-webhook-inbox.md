@@ -934,7 +934,8 @@ Route::get('/wa/webhook', [WaWebhookController::class, 'verify'])->name('wa.webh
 php artisan test tests/Unit/WebhookSignatureTest.php && php artisan test tests/Feature/WebhookVerifyTest.php
 ```
 
-Expected: 6 passed, then 7 passed. Full suite `php artisan test` should then report 20 passed.
+Expected: `WebhookSignatureTest` 6 passed; `WebhookVerifyTest` 6 passed (three pre-existing
+plus the three added above); full suite 20 passed.
 
 - [ ] **Step 10: Commit**
 

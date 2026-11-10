@@ -1830,7 +1830,7 @@ git commit -m "feat: signature-verified webhook ingest with replay and foreign-n
 **Deliverable:** parsed items become rows: profile names land on the contact, inbound messages set `last_inbound_at`, outbound rows are recorded, statuses map onto the row they belong to and never move backwards, statuses for unknown `wamid`s are dropped.
 
 **Consumes:** the item shapes from Task 4, `WaMessage::record()`, `WaContact::fromPhone()`.
-**Produces:** `App\Jobs\ProcessInboundEvent` (constructor `array $item`), `WaContact::touchInbound(CarbonInterface $at): void`, `WaMessage::applyStatus(string $status, CarbonInterface $at, ?string $code, ?string $title): void`.
+**Produces:** `App\Jobs\ProcessInboundEvent` (constructor `array $item`), `WaContact::touchInbound(CarbonInterface $at): void`, `WaContact::isDialable(string $digits): bool` (R28 — the parser calls it too), `WaMessage::applyStatus(string $status, CarbonInterface $at, ?string $code, ?string $title): void`.
 
 - [ ] **Step 1: Write the failing test** — `tests/Feature/IngestRowsTest.php`
 
@@ -2098,7 +2098,56 @@ here would claim a send this app cannot account for — and the echo's `raw` pay
 verbatim, which is where `button_id` lives, because `wa_messages` has no `button_id` column
 (`grep -rn button_id app/ database/` finds only the parser).
 
-- [ ] **Step 4: Add the two model methods.** To `WaContact`:
+Ruling R28 closes the last way this job can throw on data: **length.** `WaContact::fromPhone()`
+raises `InvalidArgumentException` when the digits string is shorter than 10 (app/Models/WaContact.php:30),
+and until now the parser guaranteed only *non-empty* — `if ($phone === '')`. A signed body carrying
+`"from": "12"` therefore parsed into a perfectly usable-looking item and threw inside the job, three
+retries and a `failed_jobs` row per callback. That is the R24/R26 class one level on: a value that is
+the right shape and non-empty but out of the accepted range, checked where it is written instead of
+where it is read. The floor now lives in one predicate both sides call.
+
+Deliberately **not** done, and the reason recorded so a reviewer can argue with evidence: wrapping
+`dispatch()` in `try/catch (\Throwable)` would also silence this class of failure — but it silences
+every other processing failure with it, converting a real defect into a log line while the inbox
+quietly stops filling. The job's throw only reaches the HTTP response when the queue runs inline,
+and this app deploys with `QUEUE_CONNECTION=database` (`.env.example:38`); under that driver a job
+failure cannot make Meta retry at all. So the never-5xx guarantee holds by *configuration*, and
+Task 16 carries it as a hard constraint: **do not deploy with `sync`** — with `sync`, any exception
+in `ProcessInboundEvent` becomes a 500 on the callback and, after retries, a dropped subscription.
+Step 4b makes that constraint non-hypothetical for the one throw we know about; if a later task
+finds another, prefer bounding it at the reader over catching it here.
+
+Ruling R29 is R28's other edge and the last one the parser owns: **column width is part of the
+accepted range.** It belongs here rather than in a `try/catch` at the write because the tests cannot
+see it — sqlite, this project's test database, does not enforce varchar widths, so an over-long
+value passes locally and becomes MariaDB error 1406 on the deployed MySQL. Descriptive fields are
+truncated to their column; `phone` is dropped above 20 digits, because a truncated phone number is
+a different recipient and the inbox is where someone clicks Reply.
+
+- [ ] **Step 4: Add the model methods and the dialable rule.** To `WaContact`:
+
+```php
+    /**
+     * The single definition of "this digits string is a phone we can store". fromPhone()
+     * throws below it, and WebhookParser drops below it too (Ruling R28) so the exception
+     * is unreachable from callback data. Keeping the two on one predicate is the point:
+     * duplicated literals drift, and drift here means either a queued job that fails three
+     * times per callback or a callback item silently vanishing.
+     */
+    public static function isDialable(string $digits): bool
+    {
+        return strlen($digits) >= 10;
+    }
+```
+
+and change `fromPhone()`'s guard to use it — the `''` case is already covered by the length:
+
+```php
+        $phone = self::digitsOnly($raw);
+        if (!self::isDialable($phone)) {
+            throw new \InvalidArgumentException("not an E.164 number: {$raw}");
+        }
+```
 
 ```php
     public function touchInbound(CarbonInterface $at): void
@@ -2140,6 +2189,144 @@ and add `use Carbon\CarbonInterface;` to its imports. To `WaMessage`:
 
 add `public const DELETED = 'deleted';` next to the other status constants, and `use Carbon\CarbonInterface;` to its imports.
 
+- [ ] **Step 4b: Make the parser the place that length is decided** (Ruling R28). Three guards in
+  `app/Support/WebhookParser.php` change; nothing else in the file moves. `profile()` currently reads
+  `if ($phone === '' || $name === null)`, and `message()` and `status()` each read
+  `if ($phone === '')` — all three become the predicate:
+
+```php
+        if (!WaContact::isDialable($phone) || $name === null) {
+            return null;
+        }
+```
+
+```php
+        if (!WaContact::isDialable($phone)) {
+            return null;
+        }
+```
+
+`app/Models/WaContact` is already imported by the parser (`use App\Models\WaContact;`), so no new
+import. Append these two tests — the first to `tests/Feature/WebhookParserTest.php` (13 tests) and the
+second to `tests/Feature/WebhookIngestTest.php` (9 tests, and it needs `use App\Models\WaContact;`):
+
+```php
+    public function test_a_number_too_short_to_store_is_dropped_where_it_is_read(): void
+    {
+        $parsed = WebhookParser::parse($this->bodyOf([
+            'messages' => [['from' => '12', 'id' => 'wamid.S1', 'text' => ['body' => 'hi']]],
+            'statuses' => [['id' => 'wamid.S2', 'recipient_id' => '999', 'status' => 'delivered']],
+            'contacts' => [['wa_id' => '55', 'profile' => ['name' => 'Short']]],
+        ]), self::OURS);
+
+        $this->assertSame([], $parsed['items']);
+        $this->assertTrue($parsed['matched'], 'dropping the items must not lose the match');
+    }
+```
+
+```php
+    public function test_a_callback_whose_message_number_is_unusable_still_stores_and_answers_200()
+    {
+        // Ruling R28. "12" is a non-empty digits string, so pre-R28 it parsed into a normal
+        // item and reached WaContact::fromPhone(), which throws below 10 digits -- three
+        // retries and a failed_jobs row per callback. The item dies at the parser instead,
+        // the audit row keeps the callback, and the usable contact from the same body lands.
+        $raw = str_replace('"from":"18479043315"', '"from":"12"',
+            file_get_contents(base_path('tests/Fixtures/inbound_text.json')));
+
+        $this->postCallback($raw)->assertOk();
+        $this->assertSame(WaWebhookEvent::STORED, WaWebhookEvent::first()->status);
+        $this->assertSame('18479043315', WaContact::query()->value('phone'));
+        $this->assertSame(0, WaMessage::count());
+    }
+```
+
+Both are load-bearing: with the guards reverted to `=== ''`, the parser test gets three items back
+and the ingest test dispatches a job that throws.
+
+- [ ] **Step 4c: Finish the limits in the same place** (Ruling R29). R28 bounded the phone's lower
+  end; the upper ends are still open, and they are open **where the database will reject them**. The
+  columns are `wa_contacts.phone` varchar(20), `wa_contacts.profile_name` varchar(255),
+  `wa_messages.type` varchar(24), `wa_messages.template_name` varchar(255),
+  `wa_messages.template_lang` varchar(10), `wa_messages.status` varchar(24) and
+  `wa_messages.error_title` varchar(255) (database/migrations/2026_11_06_000001_create_wa_tables.php).
+  MariaDB in strict mode answers an overflow with error 1406, which Laravel raises as a
+  `QueryException` — inside the job, so under the deployed `database` queue that is a silently
+  failing job, and sqlite **will not show it to you**: this project's test database does not enforce
+  column widths at all (measured in an earlier round — an over-long insert succeeds on sqlite and
+  1406s on MariaDB). Every other field in the parser is already capped (`entry_id` 64,
+  `phone_number_id` 64, `meta_id` 128, `error_code` 12); these were missed.
+
+Two rules, chosen deliberately differently:
+
+1. **Truncate** the descriptive fields, because the row is worth keeping and a cut-down label is
+   honest — a 40-character `type` is not a message type we have a name for, but the message is real.
+2. **Drop** the phone above 20 digits, because a truncated phone number is a *different person's*
+   number and the inbox is where someone later clicks Reply. E.164 caps at 15 digits, so anything
+   over 20 is not a phone at all.
+
+`WaContact::isDialable` therefore becomes a range, and its comment says why the ceiling is the
+column, not the standard:
+
+```php
+    public static function isDialable(string $digits): bool
+    {
+        return strlen($digits) >= 10 && strlen($digits) <= 20;
+    }
+```
+
+The parser caps, using the `$max` argument `str()` and `nullableStr()` already accept — the `?:`
+fallback stays *outside* the cap so a 40-character type still becomes its first 24 characters rather
+than `unknown`:
+
+```php
+            'type' => self::str($m['type'] ?? null, 24) ?: 'unknown',
+            'template_name' => self::nullableStr(self::path($m, 'template', 'name'), 255),
+            'template_lang' => self::nullableStr(self::path($m, 'template', 'language', 'code'), 10),
+```
+
+```php
+            'status' => self::str($s['status'] ?? null, 24) ?: 'unknown',
+            'error_title' => self::nullableStr(self::path($s, 'errors', 0, 'title'), 255),
+```
+
+```php
+        $name = self::nullableStr(self::path($contact, 'profile', 'name'), 255);
+```
+
+Two more tests go in `tests/Feature/WebhookParserTest.php` (14 tests after this step):
+
+```php
+    public function test_descriptive_fields_are_cut_to_the_column_width_and_a_too_long_phone_is_dropped(): void
+    {
+        $long = str_repeat('x', 300);
+
+        $parsed = WebhookParser::parse($this->bodyOf([
+            'contacts' => [['wa_id' => '18479043315', 'profile' => ['name' => $long]]],
+            'messages' => [['from' => '18479043315', 'id' => 'wamid.W1', 'type' => $long,
+                'text' => ['body' => 'hi'], 'template' => ['name' => $long,
+                    'language' => ['code' => $long]]]],
+            'statuses' => [['id' => 'wamid.W2', 'recipient_id' => '18479043315', 'status' => $long,
+                'errors' => [['code' => 131049, 'title' => $long]]]],
+        ]), self::OURS);
+
+        $this->assertCount(3, $parsed['items']);
+        $this->assertSame(255, mb_strlen($parsed['items'][0]['name']));
+        $this->assertSame(24, strlen($parsed['items'][1]['type']));
+        $this->assertSame(255, strlen($parsed['items'][1]['template_name']));
+        $this->assertSame(10, strlen($parsed['items'][1]['template_lang']));
+        $this->assertSame(24, strlen($parsed['items'][2]['status']));
+        $this->assertSame(255, strlen($parsed['items'][2]['error_title']));
+
+        $hostile = WebhookParser::parse($this->bodyOf([
+            'messages' => [['from' => '184790433159999999999999', 'id' => 'wamid.W3',
+                'text' => ['body' => 'hi']]],
+        ]), self::OURS);
+
+        $this->assertSame([], $hostile['items'], 'a truncated phone would be someone else');
+    }
+```
+
 - [ ] **Step 5: Wire the dispatch** — replace the body of `WaWebhookController::dispatch()`:
 
 ```php
@@ -2157,14 +2344,23 @@ with `use App\Jobs\ProcessInboundEvent;` added to the imports.
 php artisan test tests/Feature/IngestRowsTest.php
 ```
 
-Expected: **6 passed** (4 as written above plus the two R27 echo tests). Full suite: **45 passed**
-(39 today + these 6). `QUEUE_CONNECTION=sync` in `phpunit.xml` runs the job inline; on a real queue
-the same code runs in the worker.
+Expected: **6 passed** (4 as written above plus the two R27 echo tests). Then the R28/R29 tests and
+the full suite:
+
+```bash
+php artisan test tests/Feature/WebhookParserTest.php tests/Feature/WebhookIngestTest.php tests/Feature/IngestRowsTest.php
+php artisan test
+```
+
+Expected: **29 passed** (14 parser + 9 ingest + 6 rows) and full suite **49 passed** (40 today + the
+6 rows + 2 parser + 1 ingest). `QUEUE_CONNECTION=sync` in `phpunit.xml` runs the job inline — which
+is exactly why the R28 guards matter, and exactly why the deployed driver must not be `sync`.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add app tests/Feature/IngestRowsTest.php tests/Fixtures
+git add app tests/Feature/IngestRowsTest.php tests/Feature/WebhookParserTest.php \
+        tests/Feature/WebhookIngestTest.php tests/Fixtures
 git commit -m "feat: normalise webhook items into contacts, messages and receipts"
 ```
 

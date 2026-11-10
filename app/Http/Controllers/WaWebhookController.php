@@ -28,7 +28,7 @@ class WaWebhookController extends Controller
         return response($challenge, 200);
     }
 
-    public function ingest(Request $request)
+    public function ingest(Request $request): Response
     {
         $raw = $request->getContent();
         $secret = (string) config('whatsapp.app_secret', '');
@@ -47,7 +47,7 @@ class WaWebhookController extends Controller
 
         $parsed = WebhookParser::parse($payload, (string) config('whatsapp.phone_id', ''));
         $hash = hash('sha256', $raw);
-        $entryId = $this->stringOrNull($payload['entry'][0]['id'] ?? null);
+        $entryId = $parsed['entry_id'];
         $ours = (string) config('whatsapp.phone_id', '');
         $numberFor = $parsed['matched'] ? $ours : $parsed['phone_number_id'];
 
@@ -74,19 +74,7 @@ class WaWebhookController extends Controller
         return $this->accepted();
     }
 
-    /**
-     * Same rule as param(), one step further along the request: anything we hand to a
-     * typed argument comes from a body Meta signs with our app secret, so a value that
-     * is not a string is not a format we recognise and must not be able to raise a
-     * TypeError. A TypeError is a 500, and a 500 on the POST is what makes Meta drop
-     * the subscription (Ruling R23).
-     */
-    private function stringOrNull(mixed $value): ?string
-    {
-        return is_string($value) ? $value : null;
-    }
-
-    private function accepted()
+    private function accepted(): Response
     {
         return response('', 200);
     }

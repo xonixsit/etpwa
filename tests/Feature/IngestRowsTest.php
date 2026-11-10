@@ -225,6 +225,32 @@ class IngestRowsTest extends TestCase
         $this->assertSame(WaMessage::INCOMING, WaMessage::where('meta_id', 'wamid.R9')->value('status'));
     }
 
+    public function test_a_record_cannot_re_parent_or_turn_an_existing_wamid(): void
+    {
+        // R30's identity half. A wamid's contact and direction are settled when its row is created,
+        // so a callback that disagrees about either is noise, not news. Deleting the unset() that
+        // drops those two keys from an update left the whole suite green until this test existed.
+        $jane = WaContact::factory()->create(['phone' => '18479043315']);
+        $other = WaContact::factory()->create(['phone' => '15551234567']);
+
+        WaMessage::record([
+            'wa_contact_id' => $jane->id, 'meta_id' => 'wamid.R10', 'direction' => WaMessage::IN,
+            'type' => 'text', 'body' => 'hi', 'status' => WaMessage::INCOMING, 'sent_at' => now(),
+        ]);
+
+        WaMessage::record([
+            'wa_contact_id' => $other->id, 'meta_id' => 'wamid.R10', 'direction' => WaMessage::OUT,
+            'type' => 'text', 'body' => 'corrected in place', 'status' => WaMessage::SENT,
+            'sent_at' => now(),
+        ]);
+
+        $m = WaMessage::firstWhere('meta_id', 'wamid.R10');
+        $this->assertSame(1, WaMessage::where('meta_id', 'wamid.R10')->count());
+        $this->assertSame($jane->id, (int) $m->wa_contact_id, 'a disagreeing callback must not re-parent the row');
+        $this->assertSame(WaMessage::IN, $m->direction);
+        $this->assertSame('corrected in place', $m->body, 'only identity and status are refused, not the payload');
+    }
+
     public function test_the_error_fields_travel_with_the_status_that_wrote_them(): void
     {
         $c = WaContact::factory()->create(['phone' => '18479043315']);

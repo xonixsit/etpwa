@@ -16,7 +16,13 @@ class WaWebhookController extends Controller
             return response('forbidden', 403);
         }
 
-        return response($this->param($request, 'hub.challenge', 'hub_challenge'), 200);
+        $challenge = $this->param($request, 'hub.challenge', 'hub_challenge');
+
+        if ($challenge === '') {
+            return response('forbidden', 403);
+        }
+
+        return response($challenge, 200);
     }
 
     /**

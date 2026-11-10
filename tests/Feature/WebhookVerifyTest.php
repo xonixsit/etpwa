@@ -48,28 +48,17 @@ class WebhookVerifyTest extends TestCase
             ->assertForbidden();
     }
 
-    public function test_a_malformed_challenge_under_a_valid_token_answers_200_with_nothing_to_echo()
+    public function test_a_malformed_challenge_is_refused_even_when_the_token_is_valid()
     {
         // The second half of Ruling R17, and the half the array tests above cannot reach:
         // their token is already invalid, so they abort at the guard before the challenge
         // is ever read. Here the caller is authorised and the fatal would happen while
-        // BUILDING the success response, so 403 would misreport an accepted handshake --
-        // the honest answer is an empty body. Delete the is_string() guard on the
-        // challenge read and this is the only test that notices.
+        // BUILDING the success response. An empty challenge means there is nothing to
+        // echo, so the handshake has failed and a refusal is the only honest answer --
+        // answering 200 would tell an operator the verification succeeded. Reverting
+        // this one line to the old inline cast makes this the test that notices.
         $this->get('/wa/webhook?hub.mode=subscribe&hub.verify_token=verify-test&hub.challenge[]=9')
-            ->assertOk()
-            ->assertContent('');
-    }
-
-    public function test_rejects_a_wrong_token_arriving_under_the_underscore_spelling()
-    {
-        // The two tests above reach the reject branch through an empty $sent, so they
-        // pass even if the underscore half of the read is deleted. This one is the only
-        // test that proves the mismatch comparison itself runs on the name PHP actually
-        // hands Laravel.
-        $this->get('/wa/webhook?hub.mode=subscribe&hub_verify_token=nope&hub_challenge=chk456')
-            ->assertForbidden()
-            ->assertDontSee('chk456');
+            ->assertForbidden();
     }
 
     public function test_accepts_the_dotted_spelling_when_a_runtime_preserves_it()

@@ -140,13 +140,27 @@ class WebhookParserTest extends TestCase
     public function test_a_missing_or_absurd_timestamp_is_null_not_now(): void
     {
         $parsed = WebhookParser::parse($this->bodyOf([
-            'messages' => [['id' => 'wamid.T1', 'from' => '18479043315', 'text' => ['body' => 'hi']],
-                ['id' => 'wamid.T2', 'from' => '18479043315', 'timestamp' => -5, 'text' => ['body' => 'hi']]],
+            'messages' => [
+                ['id' => 'wamid.T1', 'from' => '18479043315', 'text' => ['body' => 'hi']],
+                ['id' => 'wamid.T2', 'from' => '18479043315', 'timestamp' => -5, 'text' => ['body' => 'hi']],
+                ['id' => 'wamid.T3', 'from' => '18479043315', 'timestamp' => 1e14, 'text' => ['body' => 'hi']],
+                ['id' => 'wamid.T4', 'from' => '18479043315', 'timestamp' => 1e30, 'text' => ['body' => 'hi']],
+                ['id' => 'wamid.T5', 'from' => '18479043315', 'timestamp' => '99999999999999999999',
+                    'text' => ['body' => 'hi']],
+            ],
+            'statuses' => [
+                ['id' => 'wamid.T6', 'recipient_id' => '18479043315', 'status' => 'delivered',
+                    'timestamp' => 1e30],
+            ],
         ]), self::OURS);
 
-        $this->assertCount(2, $parsed['items']);
+        $this->assertCount(6, $parsed['items']);
         $this->assertNull($parsed['items'][0]['sent_at']);
         $this->assertNull($parsed['items'][1]['sent_at']);
+        $this->assertNull($parsed['items'][2]['sent_at']);
+        $this->assertNull($parsed['items'][3]['sent_at']);
+        $this->assertNull($parsed['items'][4]['sent_at']);
+        $this->assertNull($parsed['items'][5]['status_at']);
     }
 
     public function test_message_from_our_own_number_is_outbound_and_attributed_to_the_recipient(): void

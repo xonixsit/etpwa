@@ -183,11 +183,18 @@ class WebhookParser
      * one, because Task 5 would then have no way to tell "Meta said when" from "we
      * guessed". Consumers coalesce (`$item['sent_at'] ?? now()`); wa_messages.sent_at
      * is NOT NULL with useCurrent, so the fallback belongs at the write, not here.
+     *
+     * The ceiling is not cosmetic. Carbon::createFromTimestamp throws
+     * InvalidFormatException from roughly 1e14 upwards, and an uncaught throw here is a
+     * 500 -- so a signed body carrying `"timestamp":1e30` would drop the subscription.
+     * 4e10 is year 3237: far above any real callback, far below the throw.
      */
     private static function ts(mixed $epoch): ?CarbonInterface
     {
-        return is_numeric($epoch) && $epoch > 0
-            ? Carbon::createFromTimestamp((int) $epoch, 'UTC')
-            : null;
+        if (!is_numeric($epoch) || $epoch <= 0 || $epoch > 4e10) {
+            return null;
+        }
+
+        return Carbon::createFromTimestamp((int) $epoch, 'UTC');
     }
 }

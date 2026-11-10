@@ -77,7 +77,7 @@ class WebhookParser
     private static function message(mixed $raw): ?array
     {
         $m = self::arr($raw);
-        $mine = self::str(config('whatsapp.my_number'));
+        $mine = WaContact::digitsOnly(self::str(config('whatsapp.my_number')));
         $from = self::str($m['from'] ?? null);
         $isOut = $mine !== '' && $from === $mine;
         $phone = WaContact::digitsOnly($isOut ? self::str($m['to'] ?? null) : $from);
@@ -179,21 +179,32 @@ class WebhookParser
     }
 
     /**
+     * 2020-01-01. Below this it is not a callback: the Business Platform is newer than the value,
+     * and the low end of a MySQL `timestamp` is where a session zone east of UTC starts rejecting
+     * the write outright (`1970-01-01 00:00:01` is 1292 on a +05:30 box).
+     */
+    private const MIN_EPOCH = 1577836800;
+
+    /**
      * Null, not `now()`: a callback with no usable timestamp does not get to invent
      * one, because Task 5 would then have no way to tell "Meta said when" from "we
      * guessed". Consumers coalesce (`$item['sent_at'] ?? now()`); wa_messages.sent_at
      * is NOT NULL with useCurrent, so the fallback belongs at the write, not here.
      *
-     * The ceiling is not cosmetic. Carbon::createFromTimestamp throws
-     * InvalidFormatException from roughly 1e14 upwards, and an uncaught throw here is a
-     * 500 -- so a signed body carrying `"timestamp":1e30` would drop the subscription.
-     * 4e10 is year 3237: far above any real callback, far below the throw. The floor is
-     * `1`, not `0`, because the (int) cast turns a sub-second fraction into epoch 0,
-     * which would be an invented 1970 date rather than the null Task 5 coalesces.
+     * The band is not cosmetic at either end. Carbon::createFromTimestamp throws
+     * InvalidFormatException from roughly 1e14 upwards, and an uncaught throw here is a 500 -- so a
+     * signed body carrying `"timestamp":1e30` would drop the subscription. The far side has two
+     * more reasons: the `timestamp` columns reject a value past 2038 outright (1292, which under
+     * the deployed `database` queue is a silently lost receipt), and a future stamp lands in
+     * last_inbound_at, which is exactly what WaContact::windowOpen() reads -- so `1893456000` held
+     * a service window open until 2030 when measured through the real job. An event that already
+     * happened cannot be stamped in the future, so the ceiling is now plus a day of clock skew.
+     * `2147483647` is not enough of a ceiling: 2030 is under it.
      */
     private static function ts(mixed $epoch): ?CarbonInterface
     {
-        if (!is_numeric($epoch) || $epoch < 1 || $epoch > 4e10) {
+        if (!is_numeric($epoch) || $epoch < self::MIN_EPOCH
+            || $epoch > Carbon::now()->addDay()->getTimestamp()) {
             return null;
         }
 

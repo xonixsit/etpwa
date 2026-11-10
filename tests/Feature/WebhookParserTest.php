@@ -2,8 +2,10 @@
 
 namespace Tests\Feature;
 
+use App\Models\WaMessage;
 use App\Support\WebhookParser;
 use Carbon\CarbonInterface;
+use Illuminate\Support\Carbon;
 use Tests\TestCase;
 
 class WebhookParserTest extends TestCase
@@ -279,5 +281,40 @@ class WebhookParserTest extends TestCase
         ]), self::OURS);
 
         $this->assertSame([], $hostile['items'], 'a truncated phone would be someone else');
+    }
+
+    public function test_a_timestamp_in_the_future_is_not_a_timestamp(): void
+    {
+        // R31: the far side of the band is not only a bad date, it is last_inbound_at, and
+        // last_inbound_at is the 24-hour service window. 2030 stores happily on MariaDB, so a
+        // 2038 ceiling would not have closed this.
+        $future = WebhookParser::parse($this->bodyOf([
+            'messages' => [['from' => '18479043315', 'id' => 'wamid.F1',
+                'timestamp' => '1893456000', 'text' => ['body' => 'hi']]],
+        ]), self::OURS);
+        $this->assertNull($future['items'][0]['sent_at']);
+
+        $skew = WebhookParser::parse($this->bodyOf([
+            'messages' => [['from' => '18479043315', 'id' => 'wamid.F2',
+                'timestamp' => (string) Carbon::now()->addHours(2)->getTimestamp(),
+                'text' => ['body' => 'hi']]],
+        ]), self::OURS);
+        $this->assertNotNull($skew['items'][0]['sent_at'], 'a clock a little ahead is still a callback');
+    }
+
+    public function test_our_own_number_is_recognised_whatever_punctuation_it_is_configured_with(): void
+    {
+        // R32: WA_MY_NUMBER is compared against Meta's `from`. '+1 (224) 214-4261' is how a person
+        // writes it and how display_phone_number reads; both must still mean "this is our traffic".
+        config(['whatsapp.my_number' => '+1 (224) 214-4261']);
+
+        $parsed = WebhookParser::parse($this->bodyOf([
+            'messages' => [['from' => '12242144261', 'to' => '18479043315', 'id' => 'wamid.E1',
+                'timestamp' => '1793996090', 'type' => 'template',
+                'template' => ['name' => 'opener_brand', 'language' => ['code' => 'en_US']]]],
+        ]), self::OURS);
+
+        $this->assertSame(WaMessage::OUT, $parsed['items'][0]['direction']);
+        $this->assertSame('18479043315', $parsed['items'][0]['phone']);
     }
 }

@@ -64,7 +64,12 @@ class ProcessInboundEvent implements ShouldQueue
         $row = WaMessage::record($attrs);
 
         if ($inbound) {
-            $contact->touchInbound($at);
+            // R31: an unusable timestamp is not evidence of a reply time, and last_inbound_at is
+            // what opens the service window, so the contact is left alone. The row above still
+            // gets now(), because wa_messages.sent_at is NOT NULL.
+            if ($item['sent_at'] !== null) {
+                $contact->touchInbound($item['sent_at']);
+            }
             // Task 7 adds the automatic-response call here.
         }
     }
@@ -76,6 +81,12 @@ class ProcessInboundEvent implements ShouldQueue
         if ($row === null) {
             return;
         }
+
+        $contactId = WaContact::where('phone', $item['phone'])->value('id');
+        if ($contactId === null || (int) $row->wa_contact_id !== (int) $contactId) {
+            return;
+        }
+
         $row->applyStatus($item['status'], $item['status_at'] ?? now(),
             $item['error_code'], $item['error_title']);
     }

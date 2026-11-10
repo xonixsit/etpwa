@@ -46,11 +46,20 @@ class WaMessage extends Model
     public static function record(array $attrs): self
     {
         $id = $attrs['meta_id'] ?? null;
-        if ($id !== null && $id !== '') {
-            return self::updateOrCreate(['meta_id' => $id], $attrs);
+        $row = ($id === null || $id === '') ? null : self::where('meta_id', $id)->first();
+
+        if ($row === null) {
+            return self::create($attrs);
         }
 
-        return self::create($attrs);
+        if ($row->direction === self::IN || !self::mayReplaceStatus($row->status, $attrs['status'] ?? null)) {
+            unset($attrs['status'], $attrs['status_at'], $attrs['error_code'], $attrs['error_title']);
+        }
+        unset($attrs['wa_contact_id'], $attrs['direction']);
+
+        $row->update($attrs);
+
+        return $row;
     }
 
     public static function findByMetaId(?string $id): ?self
@@ -68,22 +77,48 @@ class WaMessage extends Model
         self::READ => 3,
     ];
 
-    public function applyStatus(string $status, CarbonInterface $at, ?string $code, ?string $title): void
+    private const TERMINAL = [self::FAILED, self::DELETED];
+
+    /**
+     * R30: the one rule for changing a delivery state. Both writers go through it -- applyStatus()
+     * for a receipt and record() for a message item -- because the round-1 hole was exactly that
+     * record() had no opinion. A status may enter a terminal state from anywhere (a failure is
+     * always believed, and believed late: Meta does not order its callbacks) and may leave one only
+     * into another terminal state. Otherwise it has to move strictly forward, so a duplicate
+     * `delivered` cannot even rewrite `status_at`. `unknown` and `incoming` are deliberately
+     * unranked: they are not evidence of delivery, so they cannot outrank a receipt.
+     */
+    private static function mayReplaceStatus(?string $current, ?string $next): bool
     {
-        $current = self::RANK[$this->status] ?? 0;
-        $incoming = self::RANK[$status] ?? 0;
+        if ($next === null) {
+            return false;
+        }
 
-        if ($status === self::FAILED || $status === self::DELETED) {
-            $this->update([
-                'status' => $status, 'status_at' => $at,
-                'error_code' => $code, 'error_title' => $title,
-            ]);
+        if ($current === null) {
+            return true;
+        }
 
+        if (in_array($current, self::TERMINAL, true)) {
+            return in_array($next, self::TERMINAL, true);
+        }
+
+        return in_array($next, self::TERMINAL, true)
+            || (self::RANK[$next] ?? 0) > (self::RANK[$current] ?? 0);
+    }
+
+    public function applyStatus(string $status, CarbonInterface $at, ?string $code = null, ?string $title = null): void
+    {
+        if ($this->direction === self::IN || !self::mayReplaceStatus($this->status, $status)) {
             return;
         }
 
-        if ($incoming > $current) {
-            $this->update(['status' => $status, 'status_at' => $at]);
-        }
+        $terminal = in_array($status, self::TERMINAL, true);
+
+        $this->update([
+            'status' => $status,
+            'status_at' => $at,
+            'error_code' => $terminal ? $code : null,
+            'error_title' => $terminal ? $title : null,
+        ]);
     }
 }

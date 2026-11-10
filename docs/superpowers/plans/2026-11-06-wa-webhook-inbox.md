@@ -821,12 +821,25 @@ class WebhookVerifyTest extends TestCase
         // Casting an array to string raises a warning, which Laravel promotes to an
         // ErrorException, so an unauthenticated request would answer 500. A public
         // endpoint must answer 403 instead (Ruling R17).
-        $this->get('/wa/webhook?hub_verify_token[]=x')
+        $this->get('/wa/webhook?hub_verify_token[]=x&hub_challenge=chk789')
             ->assertForbidden()
-            ->assertDontSee('chk123');
+            ->assertDontSee('chk789');
 
         $this->get('/wa/webhook?hub.verify_token[a]=1&hub.challenge[a]=2')
             ->assertForbidden();
+    }
+
+    public function test_a_malformed_challenge_under_a_valid_token_answers_200_with_nothing_to_echo()
+    {
+        // The second half of Ruling R17, and the half the array tests above cannot reach:
+        // their token is already invalid, so they abort at the guard before the challenge
+        // is ever read. Here the caller is authorised and the fatal would happen while
+        // BUILDING the success response, so 403 would misreport an accepted handshake --
+        // the honest answer is an empty body. Delete the is_string() guard on the
+        // challenge read and this is the only test that notices.
+        $this->get('/wa/webhook?hub.mode=subscribe&hub.verify_token=verify-test&hub.challenge[]=9')
+            ->assertOk()
+            ->assertContent('');
     }
 
     public function test_rejects_a_wrong_token_arriving_under_the_underscore_spelling()
@@ -934,8 +947,7 @@ Route::get('/wa/webhook', [WaWebhookController::class, 'verify'])->name('wa.webh
 php artisan test tests/Unit/WebhookSignatureTest.php && php artisan test tests/Feature/WebhookVerifyTest.php
 ```
 
-Expected: `WebhookSignatureTest` 6 passed; `WebhookVerifyTest` 6 passed (three pre-existing
-plus the three added above); full suite 20 passed.
+Expected: `WebhookSignatureTest` 6 passed; `WebhookVerifyTest` 7 passed; full suite 21 passed.
 
 - [ ] **Step 10: Commit**
 

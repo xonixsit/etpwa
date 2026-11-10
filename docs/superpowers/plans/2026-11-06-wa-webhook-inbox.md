@@ -2650,6 +2650,32 @@ not apply to them:
         $this->assertSame(WaMessage::INCOMING, WaMessage::where('meta_id', 'wamid.R9')->value('status'));
     }
 
+    public function test_a_record_cannot_re_parent_or_turn_an_existing_wamid(): void
+    {
+        // R30's identity half. A wamid's contact and direction are settled when its row is created,
+        // so a callback that disagrees about either is noise, not news. Deleting the unset() that
+        // drops those two keys from an update left the whole suite green until this test existed.
+        $jane = WaContact::factory()->create(['phone' => '18479043315']);
+        $other = WaContact::factory()->create(['phone' => '15551234567']);
+
+        WaMessage::record([
+            'wa_contact_id' => $jane->id, 'meta_id' => 'wamid.R10', 'direction' => WaMessage::IN,
+            'type' => 'text', 'body' => 'hi', 'status' => WaMessage::INCOMING, 'sent_at' => now(),
+        ]);
+
+        WaMessage::record([
+            'wa_contact_id' => $other->id, 'meta_id' => 'wamid.R10', 'direction' => WaMessage::OUT,
+            'type' => 'text', 'body' => 'corrected in place', 'status' => WaMessage::SENT,
+            'sent_at' => now(),
+        ]);
+
+        $m = WaMessage::firstWhere('meta_id', 'wamid.R10');
+        $this->assertSame(1, WaMessage::where('meta_id', 'wamid.R10')->count());
+        $this->assertSame($jane->id, (int) $m->wa_contact_id, 'a disagreeing callback must not re-parent the row');
+        $this->assertSame(WaMessage::IN, $m->direction);
+        $this->assertSame('corrected in place', $m->body, 'only identity and status are refused, not the payload');
+    }
+
     public function test_the_error_fields_travel_with_the_status_that_wrote_them(): void
     {
         $c = WaContact::factory()->create(['phone' => '18479043315']);
@@ -2819,16 +2845,23 @@ php artisan test tests/Feature/IngestRowsTest.php tests/Feature/WebhookParserTes
 php artisan test
 ```
 
-Expected: **15 passed** in the rows file and **16** in the parser file, and full suite **60 passed**
-(49 after round 1, plus 9 rows tests, plus 2 parser tests). Then prove each new guard is load-bearing
+Expected: **16 passed** in the rows file and **16** in the parser file, and full suite **61 passed**
+(49 after round 1, plus 10 rows tests, plus 2 parser tests). Then prove each new guard is load-bearing
 by mutation, one at a time, restoring and re-running after each. The `wamid` letters below are the
 tests that must fail, and the measured output is written under each -- this list is the record of the
-run, not a prediction. The first pass found two mutations that left the suite green (marked
-*found dead*); Step 8's R9 test and Step 8's error-carrying R5 receipt are what closed them, so this
-round ships one test more than the ruling first asked for.
+run, not a prediction. The first pass found three mutations that left the suite green (marked
+*found dead*); Step 8's R9 test, Step 8's error-carrying R5 receipt and the R10 identity test are what
+closed them, so this round ships two tests more than the ruling first asked for.
+
+Every `Measured:` line below is from the focused two-file run unless it says otherwise: 31 tests at the
+time of the run (16 parser + 15 rows), which is why a single failure reads as `1 failed, 30 passed`. The
+identity mutation is the one measured against the whole suite, because that is what showed it green.
 
 - `mayReplaceStatus()` returning `true` unconditionally -> R1, R2, R3 fail.
-  Measured: `3 failed, 28 passed`.
+  Measured: `3 failed, 28 passed`. On the *first* pass, before the R9/R10 tests existed, the three
+  failures were R1, R3 and round 1's `test_the_outbound_echo_does_not_erase_a_receipt_already_recorded`;
+  R2 needed the hardening commit before this mutation could reach it, because `record()` already
+  refused a downgrade on a row that existed and R2 is what makes it exist.
 - `mayReplaceStatus()` returning `false` unconditionally -> R5 plus round 1's
   `test_status_maps_onto_the_sent_row_and_never_moves_backwards` and
   `test_failed_status_records_the_error` fail, so the rule cannot be a blanket "never write".
@@ -2836,6 +2869,9 @@ round ships one test more than the ruling first asked for.
 - the `direction === self::IN` check deleted from `record()` -> R9 fails. *Found dead:* the first
   pass deleted only this one and R4 still passed, because R4 goes through `applyStatus()`, which
   carries its own copy of the check -- nothing tested `record()`'s.
+- the `unset($attrs['wa_contact_id'], $attrs['direction'])` line deleted from `record()` -> R10 fails.
+  Measured: `1 failed, 60 passed`. *Found dead:* the same line stayed green across the whole suite
+  until R10 existed, which is the identity half of R30 going unpinned.
 - the same check deleted from `applyStatus()` -> R4 fails. Measured: `1 failed, 30 passed` each.
 - the `'error_code' => $terminal ? … : null` ternaries replaced with `$code` / `$title` -> R5 fails.
   Measured: `1 failed, 30 passed`. *Found dead* as first written: the receipt R5 dispatched carried no
@@ -2852,7 +2888,7 @@ round ships one test more than the ruling first asked for.
 - the ownership check removed from the job's `status()` -> R8 fails. Measured: `1 failed, 30 passed`.
 - the `if ($item['sent_at'] !== null)` guard removed -> R7 fails. Measured: `1 failed, 30 passed`.
 
-All ten now break something, and each names the test that breaks.
+All eleven now break something, and each names the test that breaks.
 
 Any mutation that leaves the suite green is a test that does not test anything -- report it rather
 than shipping it.
@@ -2898,6 +2934,53 @@ App\Services\WhatsAppSender::sendTemplate(string $phone, string $name, string $l
 ```
 
 Both return the stored row; `$row->status === WaMessage::FAILED` means Meta refused or no token is configured, with `error_code` / `error_title` set. `meta_id` is non-null only when Meta accepted the send.
+
+**Pre-flight rulings R33, R34 and R35.** Task 6's text was checked against the R24–R32 rule before
+anyone implemented it, because this is the first file in the app that writes externally derived text
+into bounded columns and the first that has to keep a promise about not throwing. Three defects, each
+measured before being ruled. Steps 1 and 3 above and below already carry the corrected final text --
+implement what is written, not what these paragraphs describe replacing.
+
+**R33 -- the timeout this task asked for was inert.** The first draft wrote
+`->post($url, $payload, ['timeout' => 20])`. `PendingRequest::post()` is declared with two parameters
+(`vendor/laravel/framework/src/Illuminate/Http/Client/PendingRequest.php:888`,
+`public function post(string $url, $data = [])`), PHP accepts and discards extra arguments to a
+user-defined method (measured: a two-parameter method called with three neither errors nor sees the
+third), and Laravel's own default is `'timeout' => 30` (`PendingRequest.php:269`). So the code looked
+like a 20-second send and was a 30-second one. Fixed by calling `->timeout(20)` on the pending request.
+This one is *not* covered by a test and the reason is stated rather than hidden: `Http::fake()` never
+touches the transport, so no unit test can see a transport option. The real check is Task 16's live
+handoff, against a listener that accepts the connection and never answers; the row it must produce is
+`status=failed, error_code=network` inside about 20 seconds, not 30.
+
+**R34 -- Meta's response is external input too.** The webhook rule (R24/R29: untrusted in shape, in
+presence and in range, decided once at the reader) was never applied to what comes *back*, and every
+value read from the response goes into a bounded column. Measured, on PHP 8.2 with this app's
+autoloader:
+
+```
+(string) ['a', 'b']        -> Warning: Array to string conversion, value "Array"
+error_reporting() & E_WARNING -> HandleExceptions::handleError throws ErrorException (vendor:75-77)
+data_get(['messages' => 'x'], 'messages.0.id')                 -> NULL, no warning
+data_get(null, 'error.code')                                    -> NULL
+str_repeat('x', 400) into error_title varchar(255)              -> SQLSTATE[22001] 1406 on MariaDB,
+                                                                   accepted by sqlite (so invisible here)
+```
+
+An array-shaped `error.code` therefore made the sender throw at its caller -- a 500 on Task 12's staff
+reply, three failed attempts per send for Task 8's queued acknowledgement -- and a long message would
+have done the same on the deployed engine while the suite stayed green. The fix is one private reader,
+`str(mixed $v, int $max)`, applied at all four sites (wamid 128, error_code 12, error_title 255 twice)
+with `data_get()` for the shapes, and the HTTP status as the fallback code when the JSON does not give
+a usable one.
+
+**R35 -- the sender must recognise itself by digits, and refuse to talk without a number id.**
+`to` took the caller's `$phone` verbatim while `fromPhone()` normalised the contact behind it, so
+`+1 (847) 904-3315` stores a clean contact and sends a payload Meta answers with a 400 -- the same
+punctuation-dependence R32 measured on the inbound side. Separately, `phone_id` defaults to `''` in
+`config/whatsapp.php:6`, and the first draft built `.../v20.0//messages` and made an authenticated
+HTTPS request with a real token anyway. A missing token already stopped before the network; a missing
+phone number id is the same class of "we do not know who is sending" and stops there too.
 
 - [ ] **Step 1: Write the failing test** — `tests/Feature/WhatsAppSenderTest.php`
 
@@ -2994,6 +3077,63 @@ class WhatsAppSenderTest extends TestCase
         app(WhatsAppSender::class)->sendTemplate('18479043315', 'etp_welcome_c', 'en_US');
         Http::assertSent(fn ($r) => !array_key_exists('components', $r['template']));
     }
+
+    public function test_a_punctuated_phone_is_stored_and_sent_as_digits()
+    {
+        // R35: the payload and the contact row must not disagree about who this is.
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.OUT12']]), 200)]);
+
+        $m = app(WhatsAppSender::class)->sendText('+1 (847) 904-3315', 'Hi');
+
+        Http::assertSent(fn ($r) => $r['to'] === '18479043315');
+        $this->assertSame('18479043315', $m->contact->phone);
+        $this->assertSame('18479043315', $m->raw['to'], 'the stored payload is what was sent');
+    }
+
+    public function test_an_unconfigured_phone_id_records_a_local_failure_without_calling_graph()
+    {
+        // R35: `.../v20.0//messages` is still an authenticated request. Not knowing which number we
+        // are has to stop us before the network, exactly as a missing token does.
+        config(['whatsapp.phone_id' => '']);
+        Http::fake(['*' => Http::response([], 200)]);
+
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'x');
+
+        Http::assertNothingSent();
+        $this->assertSame(WaMessage::FAILED, $m->status);
+        $this->assertSame('local', $m->error_code);
+        $this->assertSame('no phone number id configured', $m->error_title);
+    }
+
+    public function test_a_graph_body_that_is_shaped_wrong_is_recorded_not_thrown()
+    {
+        // R34: `messages.0.id` as a list is the shape that used to reach a `(string)` cast. There is
+        // no id, so it is a failure, and its code falls back to the HTTP status.
+        Http::fake(['*' => Http::response(['messages' => [['id' => ['w', 'x']]]], 200)]);
+
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'x');
+
+        $this->assertSame(WaMessage::FAILED, $m->status);
+        $this->assertNull($m->meta_id);
+        $this->assertSame('200', $m->error_code);
+        $this->assertSame('send rejected', $m->error_title);
+    }
+
+    public function test_error_text_from_graph_is_cut_to_the_column_it_lands_in()
+    {
+        // R34: error_title is varchar(255) and both Meta's message and cURL's message are unbounded.
+        // On sqlite an over-long insert succeeds, which is how the suite would forget this bug, so
+        // the assertion is on the stored length -- the part a caller can observe on either engine.
+        Http::fake(['*' => Http::response(['error' => [
+            'message' => str_repeat('x', 400), 'code' => 131047,
+        ]]), 400)]);
+
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'x');
+
+        $this->assertSame(WaMessage::FAILED, $m->status);
+        $this->assertSame('131047', $m->error_code);
+        $this->assertSame(255, mb_strlen($m->error_title));
+    }
 }
 ```
 
@@ -3057,45 +3197,81 @@ class WhatsAppSender
         );
     }
 
+    private static function str(mixed $v, int $max): string
+    {
+        $s = match (true) {
+            is_string($v) => $v,
+            is_int($v) || is_float($v) => (string) $v,
+            default => '',
+        };
+
+        return mb_substr($s, 0, $max);
+    }
+
     private function post(array $payload, string $phone, array $attrs, bool $autoReply): WaMessage
     {
-        $contact = WaContact::fromPhone($phone);
-        $url = rtrim((string) config('whatsapp.api_base'), '/')
-            . '/' . config('whatsapp.phone_id') . '/messages';
-        $token = (string) config('whatsapp.token', '');
+        // R35: the contact row and the payload have to agree. fromPhone() normalises internally, so
+        // the first draft stored digits while sending the caller's punctuation -- Meta answers that
+        // with a 400 for a contact we filed cleanly. Normalising once, here, is the R32 rule pointed
+        // at the outbound direction.
+        $phone = WaContact::digitsOnly($phone);
+        $payload['to'] = $phone;
 
-        if ($token === '') {
+        $contact = WaContact::fromPhone($phone);
+        $token = (string) config('whatsapp.token', '');
+        $phoneId = (string) config('whatsapp.phone_id', '');
+
+        // R35: an unconfigured phone number id is the same kind of "we do not know who is sending" as
+        // an unconfigured token, and without this guard the app still makes an authenticated HTTPS
+        // request to .../v20.0//messages. Nothing goes out when either is missing.
+        if ($token === '' || $phoneId === '') {
             return WaMessage::record($attrs + [
                 'wa_contact_id' => $contact->id, 'meta_id' => null,
                 'status' => WaMessage::FAILED, 'status_at' => now(),
-                'error_code' => 'local', 'error_title' => 'no access token configured',
+                'error_code' => 'local',
+                'error_title' => $token === '' ? 'no access token configured' : 'no phone number id configured',
                 'sent_at' => now(), 'raw' => $payload,
             ]);
         }
 
+        $url = rtrim((string) config('whatsapp.api_base'), '/') . '/' . $phoneId . '/messages';
+
         try {
-            $res = $this->http->withToken($token)
-                ->asJson()
-                ->post($url, $payload, ['timeout' => 20]);
+            // R33: ->timeout() is the option. post() is declared post(string $url, $data = [])
+            // (vendor PendingRequest:888), so a third argument is accepted by PHP and thrown away --
+            // the first draft looked like it waited 20 seconds and actually waited Laravel's own
+            // default of 30 (vendor PendingRequest:269).
+            $res = $this->http->withToken($token)->asJson()->timeout(20)->post($url, $payload);
         } catch (\Throwable $e) {
             return WaMessage::record($attrs + [
                 'wa_contact_id' => $contact->id, 'meta_id' => null,
                 'status' => WaMessage::FAILED, 'status_at' => now(),
-                'error_code' => 'network', 'error_title' => $e->getMessage(),
+                'error_code' => 'network', 'error_title' => self::str($e->getMessage(), 255),
                 'sent_at' => now(), 'raw' => $payload,
             ]);
         }
 
+        // R34: Meta's response is external input too -- in shape, in presence and in range -- and
+        // every value below lands in a bounded column. data_get() is the null-safe reader (measured:
+        // a scalar `messages`, a null body and a missing key all return null with no warning), and
+        // str() is the width. `(string) ['a']` would have emitted `Warning: Array to string
+        // conversion`, which HandleExceptions::handleError (vendor:75-77) turns into an ErrorException
+        // in every environment -- i.e. the sender throwing at its caller, which the deliverable
+        // forbids -- and a 400-character `error.message` into error_title(255) is the 1406 that
+        // sqlite lets the suite forget about (the round-1 review measured both widths on MariaDB).
         $json = $res->json() ?? [];
-        $wamid = $json['messages'][0]['id'] ?? null;
+        $wamid = self::str(data_get($json, 'messages.0.id'), 128);
 
-        if ($res->failed() || $wamid === null) {
+        if ($res->failed() || $wamid === '') {
+            $code = self::str(data_get($json, 'error.code'), 12);
+            $title = self::str(data_get($json, 'error.error_data.details')
+                ?? data_get($json, 'error.message'), 255);
+
             return WaMessage::record($attrs + [
                 'wa_contact_id' => $contact->id, 'meta_id' => null,
                 'status' => WaMessage::FAILED, 'status_at' => now(),
-                'error_code' => isset($json['error']['code']) ? (string) $json['error']['code'] : (string) $res->status(),
-                'error_title' => $json['error']['error_data']['details']
-                    ?? $json['error']['message'] ?? 'send rejected',
+                'error_code' => $code === '' ? (string) $res->status() : $code,
+                'error_title' => $title === '' ? 'send rejected' : $title,
                 'sent_at' => now(), 'raw' => $payload,
             ]);
         }
@@ -3109,13 +3285,40 @@ class WhatsAppSender
 }
 ```
 
+**One boundary this class keeps, deliberately:** `WaContact::fromPhone($phone)` still throws for a
+`$phone` that is not dialable, and that is not a defect. The row cannot exist without a contact
+(`wa_contact_id` is a NOT NULL FK), so "you passed me something that is not a number" is a caller bug
+and the honest answer is an exception. Every caller in this plan passes `$contact->phone` from the
+database, which the parser already bound to 10–20 digits (R28). The rule the deliverable states --
+never throws at its callers -- is about what Meta and the network can do, and R33/R34 are what make
+that true.
+
+**Convergence, recorded so it is not lost (Task 14):** `str()` here and `str()`/`nullableStr()`/
+`path()` in `WebhookParser` are the same idea twice. Task 14 moves them into one
+`App\Support\Read` and re-checks every cap against the migration, because two copies of a width
+literal are exactly what drifts. Doing it now would have rewritten Task 4's shipped blocks, which is
+the wrong trade inside a task whose deliverable is the send path.
+
 - [ ] **Step 4: Run the test**
 
 ```bash
 php artisan test tests/Feature/WhatsAppSenderTest.php
 ```
 
-Expected: 5 passed.
+Expected: **9 passed** (the five that describe the happy and 400 paths, plus the four R34/R35 tests).
+Full suite after this task: **70 passed** (61 after Task 5 round 2, plus these 9). Then mutate each new
+guard once, restoring and re-running after each, and report any mutation that leaves the suite green:
+
+- the two `error_title` reads through `str()` back to a bare value, and the `str()` calls losing their
+  widths -> `test_error_text_from_graph_is_cut_to_the_column_it_lands_in` fails.
+- `str()`'s numeric branch dropped (`is_string($v) ? $v : ''`) -> the 400 test's `error_code` assertion
+  fails, because Meta sends its code as an integer.
+- `$payload['to'] = $phone;` removed -> `test_a_punctuated_phone_is_stored_and_sent_as_digits` fails.
+- `$phoneId === ''` removed from the guard -> `test_an_unconfigured_phone_id_records_a_local_failure_without_calling_graph`
+  fails, and `Http::assertNothingSent()` answers first.
+- `data_get($json, 'messages.0.id')` back to `$json['messages'][0]['id'] ?? null`, with the `=== ''`
+  comparison back to `=== null` -> `test_a_graph_body_that_is_shaped_wrong_is_recorded_not_thrown`
+  fails, and it fails with an exception rather than an assertion -- which is the whole point of R34.
 
 - [ ] **Step 5: Commit**
 

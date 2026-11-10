@@ -279,6 +279,25 @@ class WaTablesTest extends TestCase
             'the first reason must win');
     }
 
+    public function test_window_opens_for_a_recent_inbound_and_closes_after_24_hours()
+    {
+        $recent = WaContact::factory()->create(['last_inbound_at' => now()->subHour()]);
+        $this->assertTrue($recent->windowOpen(),
+            'an inbound inside the 24-hour window must open it');
+
+        $stale = WaContact::factory()->create(['last_inbound_at' => now()->subHours(25)]);
+        $this->assertFalse($stale->windowOpen(),
+            'a 25-hour-old inbound must close it');
+
+        $edge = WaContact::factory()->create(['last_inbound_at' => now()->subHours(24)]);
+        $this->assertFalse($edge->windowOpen(),
+            'exactly 24 hours ago is already closed, not still open');
+
+        config(['whatsapp.window_hours' => 48]);
+        $this->assertTrue($stale->fresh()->windowOpen(),
+            'the window must come from config, not a hardcoded 24');
+    }
+
     public function test_message_record_dedupes_on_meta_id_and_encrypts_body()
     {
         $c = WaContact::factory()->create();
@@ -647,7 +666,7 @@ php artisan test tests/Feature/WaTablesTest.php
 
 Expected: FAIL until Step 9, then PASS. (Step 3-7 must be done; if the factory is not found the message is `No factory found for class App\Models\WaContact` — fix by checking the namespace is `Database\Factories` and the class name is exactly `WaContactFactory`.)
 
-- [ ] **Step 9: Run `php artisan migrate --force`, then the test again.** Expected: 3 passed.
+- [ ] **Step 9: Run `php artisan migrate --force`, then the test again.** Expected: 4 passed.
 
 - [ ] **Step 10: Commit**
 

@@ -26,6 +26,14 @@
 - Copy rules: "E Tax Planner" only. "My Super Tax" must not appear in any code, view, fixture, seed or comment.
 - Windows console is cp1252 — do not print `→` or `₹` from PHP/Python; ASCII in command output.
 - Run one test file at a time: `php artisan test tests/Feature/WebhookIngestTest.php` (avoid `--filter` with bracket syntax on Windows).
+- **R36 -- code in this plan is only trustworthy once it has been parsed.** Ten lines across Tasks 6, 7
+  and 12 shipped an `Http::fake(['*' => Http::response([...])])` literal one bracket short
+  (`'wamid.OUT9']]), 200)]);`), which is a fatal parse error the moment the block is copied into a test
+  file -- and a test file that cannot be parsed reports nothing, so those tasks would have stalled at
+  their first run step with no diagnosis. All 39 complete-file `php` blocks in this plan now pass
+  `php -l`; the partial (method- and statement-sized) blocks fail only on purpose when wrapped in a class
+  body. If a step's code does not parse, the plan is wrong: say so and fix the plan text, do not silently
+  repair the code.
 
 ## File Structure
 
@@ -3008,7 +3016,7 @@ class WhatsAppSenderTest extends TestCase
 
     public function test_send_text_posts_to_graph_and_records_the_wamid()
     {
-        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.OUT9']]), 200)]);
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.OUT9']]], 200)]);
 
         $m = app(WhatsAppSender::class)->sendText('18479043315', 'Hello there');
 
@@ -3030,7 +3038,7 @@ class WhatsAppSenderTest extends TestCase
         Http::fake(['*' => Http::response(['error' => [
             'message' => 'Re-engagement message', 'code' => 131030,
             'error_data' => ['details' => 'Message undeliverable'],
-        ]]), 400)]);
+        ]], 400)]);
 
         $m = app(WhatsAppSender::class)->sendText('18479043315', 'Late reply');
 
@@ -3053,7 +3061,7 @@ class WhatsAppSenderTest extends TestCase
     public function test_template_send_re_attaches_the_approved_header_image()
     {
         config(['whatsapp.header_images' => ['etp_opener_brand' => 'https://example.test/logo.png']]);
-        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.OUT10']]), 200)]);
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.OUT10']]], 200)]);
 
         app(WhatsAppSender::class)->sendTemplate('18479043315', 'etp_opener_brand', 'en', ['Sam']);
 
@@ -3073,7 +3081,7 @@ class WhatsAppSenderTest extends TestCase
 
     public function test_template_without_variables_sends_no_components()
     {
-        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.OUT11']]), 200)]);
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.OUT11']]], 200)]);
         app(WhatsAppSender::class)->sendTemplate('18479043315', 'etp_welcome_c', 'en_US');
         Http::assertSent(fn ($r) => !array_key_exists('components', $r['template']));
     }
@@ -3081,7 +3089,7 @@ class WhatsAppSenderTest extends TestCase
     public function test_a_punctuated_phone_is_stored_and_sent_as_digits()
     {
         // R35: the payload and the contact row must not disagree about who this is.
-        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.OUT12']]), 200)]);
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.OUT12']]], 200)]);
 
         $m = app(WhatsAppSender::class)->sendText('+1 (847) 904-3315', 'Hi');
 
@@ -3126,7 +3134,7 @@ class WhatsAppSenderTest extends TestCase
         // the assertion is on the stored length -- the part a caller can observe on either engine.
         Http::fake(['*' => Http::response(['error' => [
             'message' => str_repeat('x', 400), 'code' => 131047,
-        ]]), 400)]);
+        ]], 400)]);
 
         $m = app(WhatsAppSender::class)->sendText('18479043315', 'x');
 
@@ -3473,7 +3481,7 @@ class OptOutFlowTest extends TestCase
             'whatsapp.opt_out_text' => 'You will not receive any more messages from E Tax Planner on this number.',
             'whatsapp.ack_text' => 'Thanks, a human will reply.',
         ]);
-        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.CONF1']]), 200)]);
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.CONF1']]], 200)]);
     }
 
     private function inbound(string $body, string $id = 'wamid.STOP1'): array
@@ -3503,7 +3511,7 @@ class OptOutFlowTest extends TestCase
     public function test_second_stop_does_not_confirm_again()
     {
         ProcessInboundEvent::dispatchSync($this->inbound('STOP', 'wamid.S1'));
-        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.CONF2']]), 200)]);
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.CONF2']]], 200)]);
         ProcessInboundEvent::dispatchSync($this->inbound('STOP', 'wamid.S2'));
 
         $this->assertDatabaseMissing('wa_messages', ['meta_id' => 'wamid.CONF2']);
@@ -3512,7 +3520,7 @@ class OptOutFlowTest extends TestCase
     public function test_no_acknowledgement_is_sent_to_an_opted_out_contact()
     {
         ProcessInboundEvent::dispatchSync($this->inbound('STOP', 'wamid.S1'));
-        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.CONF3']]), 200)]);
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.CONF3']]], 200)]);
         ProcessInboundEvent::dispatchSync($this->inbound('hello again', 'wamid.S3'));
 
         $this->assertDatabaseMissing('wa_messages', ['meta_id' => 'wamid.CONF3']);
@@ -4627,7 +4635,7 @@ class InboxActionsTest extends TestCase
                 'whatsapp.header_images' => ['etp_opener_brand' => 'https://example.test/logo.png']]);
         $this->contact = WaContact::factory()->create(['phone' => '18479043315',
             'profile_name' => 'Jane Tester', 'last_inbound_at' => now()->subHour()]);
-        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.STAFF1']]), 200)]);
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.STAFF1']]], 200)]);
     }
 
     public function test_reply_inside_the_window_is_sent_and_stored()

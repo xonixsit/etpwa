@@ -1329,12 +1329,19 @@ class WebhookParser
      * one, because Task 5 would then have no way to tell "Meta said when" from "we
      * guessed". Consumers coalesce (`$item['sent_at'] ?? now()`); wa_messages.sent_at
      * is NOT NULL with useCurrent, so the fallback belongs at the write, not here.
+     *
+     * The ceiling is not cosmetic. Carbon::createFromTimestamp throws
+     * InvalidFormatException from roughly 1e14 upwards, and an uncaught throw here is a
+     * 500 -- so a signed body carrying `"timestamp":1e30` would drop the subscription.
+     * 4e10 is year 3237: far above any real callback, far below the throw.
      */
     private static function ts(mixed $epoch): ?CarbonInterface
     {
-        return is_numeric($epoch) && $epoch > 0
-            ? Carbon::createFromTimestamp((int) $epoch, 'UTC')
-            : null;
+        if (!is_numeric($epoch) || $epoch <= 0 || $epoch > 4e10) {
+            return null;
+        }
+
+        return Carbon::createFromTimestamp((int) $epoch, 'UTC');
     }
 }
 ```
@@ -1436,6 +1443,18 @@ touches the decoded body, it normalises every read through `arr()` / `path()` / 
 instead of becoming a row. R17's rule ("treat a non-string as absent") and R19's ("never bare-cast
 request input") were both under-applied here; the generalised form is what Task 5 and Task 10
 must follow, not another local guard.
+
+Ruling R26 closes the fourth mechanism, found in the Round 4 re-review. Shape normalisation is
+not sufficient on its own: a value can be perfectly well-shaped and still make the parser throw.
+`Carbon::createFromTimestamp` raises `InvalidFormatException` for anything from roughly `1e14`
+upwards (measured: `4e10` → year 3237 and `1e11` → year 5138 both succeed, `1e14`, `2e14`, `1e30`
+and the numeric string `'99999999999999999999'` all throw), and that throw escapes `ts()` through
+`parse()` into a **500** — verified end-to-end through a correctly signed POST before the fix. So
+`ts()` bounds the epoch (`$epoch > 4e10` → null) rather than catching around it: 4e10 is year 3237,
+far above any timestamp Meta will ever send and far below the threshold where Carbon throws. The
+same reasoning applies to any other place in this app that converts external input into a typed
+object — bound the accepted range at the reader; a `try/catch` would keep the 500 reachable from
+whatever the next unforeseen value turns out to be.
 
 Add the imports at the top of the controller: `use App\Support\WebhookParser;`, `use App\Support\WebhookSignature;`, `use App\Models\WaWebhookEvent;`.
 
@@ -1644,13 +1663,27 @@ class WebhookParserTest extends TestCase
     public function test_a_missing_or_absurd_timestamp_is_null_not_now(): void
     {
         $parsed = WebhookParser::parse($this->bodyOf([
-            'messages' => [['id' => 'wamid.T1', 'from' => '18479043315', 'text' => ['body' => 'hi']],
-                ['id' => 'wamid.T2', 'from' => '18479043315', 'timestamp' => -5, 'text' => ['body' => 'hi']]],
+            'messages' => [
+                ['id' => 'wamid.T1', 'from' => '18479043315', 'text' => ['body' => 'hi']],
+                ['id' => 'wamid.T2', 'from' => '18479043315', 'timestamp' => -5, 'text' => ['body' => 'hi']],
+                ['id' => 'wamid.T3', 'from' => '18479043315', 'timestamp' => 1e14, 'text' => ['body' => 'hi']],
+                ['id' => 'wamid.T4', 'from' => '18479043315', 'timestamp' => 1e30, 'text' => ['body' => 'hi']],
+                ['id' => 'wamid.T5', 'from' => '18479043315', 'timestamp' => '99999999999999999999',
+                    'text' => ['body' => 'hi']],
+            ],
+            'statuses' => [
+                ['id' => 'wamid.T6', 'recipient_id' => '18479043315', 'status' => 'delivered',
+                    'timestamp' => 1e30],
+            ],
         ]), self::OURS);
 
-        $this->assertCount(2, $parsed['items']);
+        $this->assertCount(6, $parsed['items']);
         $this->assertNull($parsed['items'][0]['sent_at']);
         $this->assertNull($parsed['items'][1]['sent_at']);
+        $this->assertNull($parsed['items'][2]['sent_at']);
+        $this->assertNull($parsed['items'][3]['sent_at']);
+        $this->assertNull($parsed['items'][4]['sent_at']);
+        $this->assertNull($parsed['items'][5]['status_at']);
     }
 
     public function test_message_from_our_own_number_is_outbound_and_attributed_to_the_recipient(): void

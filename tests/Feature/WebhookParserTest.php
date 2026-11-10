@@ -137,6 +137,29 @@ class WebhookParserTest extends TestCase
         $this->assertSame('failed', $status['status']);
     }
 
+    public function test_an_interactive_button_reply_yields_its_id_and_a_missing_type_gets_named(): void
+    {
+        $parsed = WebhookParser::parse($this->bodyOf([
+            'messages' => [
+                ['from' => '18479043315', 'id' => 'wamid.B1', 'timestamp' => '1793996000',
+                    'type' => 'interactive',
+                    'interactive' => ['type' => 'button', 'button_reply' => ['id' => 'yes_stop',
+                        'title' => 'Stop reminders']]],
+                ['from' => '18479043315', 'id' => 'wamid.B2', 'text' => ['body' => 'hi']],
+            ],
+        ]), self::OURS);
+
+        $button = $parsed['items'][0];
+        $this->assertSame('yes_stop', $button['button_id']);
+        $this->assertSame('interactive', $button['type']);
+        $this->assertSame('button', $button['raw']['interactive']['type']);
+        $this->assertNull($button['text']);
+
+        // The `?: 'unknown'` default is what keeps a type-less callback from rendering as an
+        // empty cell in the inbox; it is the one branch of `type` nothing else reached.
+        $this->assertSame('unknown', $parsed['items'][1]['type']);
+    }
+
     public function test_a_missing_or_absurd_timestamp_is_null_not_now(): void
     {
         $parsed = WebhookParser::parse($this->bodyOf([

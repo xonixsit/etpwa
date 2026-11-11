@@ -538,7 +538,7 @@ class WaMessage extends Model
 
     public function contact(): BelongsTo
     {
-        return $this->belongsTo(WaContact::class);
+        return $this->belongsTo(WaContact::class, 'wa_contact_id');
     }
 
     public static function record(array $attrs): self
@@ -560,6 +560,42 @@ class WaMessage extends Model
         return self::where('meta_id', $id)->first();
     }
 }
+```
+
+**R37 -- a relation must name its key when the method name is not the column.** As first written,
+`contact()` called `belongsTo(WaContact::class)`. `HasRelationships::belongsTo()` derives the foreign key
+from the *calling method's* name (`Str::snake($relation).'_'.$instance->getKeyName()`), so it asked for
+`contact_id`; the column is `wa_contact_id`. Nothing in Tasks 2-5 ever read the relation -- grep for
+`->contact` returned zero hits -- which is how a broken schema relation survived four tasks of green
+tests, and Task 11's thread view would have been the first to meet it. Found during Task 6 by the
+implementer and reproduced by the controller. The failure mode is the reason it is worth a ruling:
+`BelongsTo::getResults()` begins with `if (is_null($this->getForeignKeyFrom($this->child))) { return
+$this->getDefaultFor($this->parent); }`, and `$this->child->contact_id` is null because no such attribute
+exists -- so it returns null **without issuing a query**. There is no `no such column: contact_id`, no
+warning, nothing in the log; the caller simply gets `Call to a member function is() on null`. Measured:
+with the second argument removed, `WaTablesTest::test_a_message_can_reach_the_contact_whose_row_holds_it`
+fails (1 failed, 4 passed) at its first assertion; with it, 5 passed. A silently null relation is the most
+dangerous shape a relation can have, because every consumer decides its own fallback. The reverse
+relation is not affected: `hasMany()` derives its key from the *parent model's* name, so
+`WaContact::messages()` already resolves to `wa_contact_id` -- asserted in the same test. The test is the
+pin, added to `tests/Feature/WaTablesTest.php` above `test_event_row_stores_and_decrypts_changes`:
+
+```php
+    public function test_a_message_can_reach_the_contact_whose_row_holds_it()
+    {
+        // R37: belongsTo() guesses the key from the method name, so contact() asked for a column
+        // named contact_id that does not exist. Nothing read the relation until Task 11's thread
+        // view, which is exactly how a broken schema relation survives four tasks of green tests.
+        $c = WaContact::factory()->create(['phone' => '18479043315']);
+        $m = WaMessage::record([
+            'wa_contact_id' => $c->id, 'meta_id' => 'wamid.REL1',
+            'direction' => WaMessage::IN, 'type' => 'text', 'body' => 'hi', 'sent_at' => now(),
+        ]);
+
+        $this->assertTrue($m->contact->is($c));
+        $this->assertSame('18479043315', $m->fresh()->contact->phone);
+        $this->assertTrue($c->fresh()->messages->contains($m));
+    }
 ```
 
 - [ ] **Step 6: `app/Models/WaWebhookEvent.php`**
@@ -674,7 +710,8 @@ php artisan test tests/Feature/WaTablesTest.php
 
 Expected: FAIL until Step 9, then PASS. (Step 3-7 must be done; if the factory is not found the message is `No factory found for class App\Models\WaContact` — fix by checking the namespace is `Database\Factories` and the class name is exactly `WaContactFactory`.)
 
-- [ ] **Step 9: Run `php artisan migrate --force`, then the test again.** Expected: 4 passed.
+- [ ] **Step 9: Run `php artisan migrate --force`, then the test again.** Expected: 4 passed as written
+      here; 5 once R37's relation test (Task 6's round) is in the file.
 
 - [ ] **Step 10: Commit**
 
@@ -3314,8 +3351,9 @@ php artisan test tests/Feature/WhatsAppSenderTest.php
 ```
 
 Expected: **9 passed** (the five that describe the happy and 400 paths, plus the four R34/R35 tests).
-Full suite after this task: **70 passed** (61 after Task 5 round 2, plus these 9). Then mutate each new
-guard once, restoring and re-running after each, and report any mutation that leaves the suite green:
+Full suite after this task: **71 passed** (62 after Task 5's rounds, which include R37's relation test,
+plus these 9). Then mutate each new guard once, restoring and re-running after each, and report any
+mutation that leaves the suite green:
 
 - the two `error_title` reads through `str()` back to a bare value, and the `str()` calls losing their
   widths -> `test_error_text_from_graph_is_cut_to_the_column_it_lands_in` fails.
@@ -3327,6 +3365,21 @@ guard once, restoring and re-running after each, and report any mutation that le
 - `data_get($json, 'messages.0.id')` back to `$json['messages'][0]['id'] ?? null`, with the `=== ''`
   comparison back to `=== null` -> `test_a_graph_body_that_is_shaped_wrong_is_recorded_not_thrown`
   fails, and it fails with an exception rather than an assertion -- which is the whole point of R34.
+
+**Measured, and one correction to the record (Task 6 Step 4).** All five bit: M1 caps lost -> 2 failed
+(`shaped-wrong`, because an uncapped `$title` is null for a body with no `error` key, and
+`cut-to-column`); M2 numeric branch -> 2 failed (the 400 test and `cut-to-column`); M3 payload `to` ->
+1 failed (`punctuated-phone`); M4 `phone_id` guard -> 1 failed (`unconfigured-phone-id`); M5 unguarded
+read -> 1 failed (`shaped-wrong`). So the first three bullets under-report: each of those guards is
+pinned by more than the test named above. The pass also has to disclose its own tooling: the driver
+that produced the *first* Task 6 numbers destructured its mutation table with
+`const [, name, ...pairs]` instead of `const [name, ...pairs]`, which silently dropped every
+mutation's first substitution pair -- so three single-pair mutations were never applied, the file was
+byte-identical to the original, and I wrote those runs up as three dead mutations and almost
+"strengthened" tests that already worked. Fixed driver, `landed=` flag printed per run, and
+`restored_identical true` after every restore. The lesson is the R36 lesson again: an absence of
+evidence produced by your own harness is not evidence of absence, and a mutation result is only
+trustworthy if the harness proves the edit landed.
 
 - [ ] **Step 5: Commit**
 

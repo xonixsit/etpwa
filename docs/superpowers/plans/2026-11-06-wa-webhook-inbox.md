@@ -3804,13 +3804,28 @@ but `S3` is a third *row*. The assertion counts what the test actually claims --
 that proves it, so a future ack regression cannot hide inside a total.
 
 **R41 -- a test class never installs an `Http::fake()` catch-all in `setUp()`; each test owns its stub.**
-Verified in vendor source, not inferred: `Factory::fake()` resets `recorded` but *merges* `stubCallbacks`
-(Factory.php:275), and `PendingRequest::buildStubHandler()` resolves with `->map(...)->filter()->first()`
-(PendingRequest.php:1512-1521), so **first-registered-wins**. A `'*'` stub installed in `setUp()` is
-registered before any test body runs, which shadows every `Http::fake()` the test itself makes. Measured
-with this plan's original Step 5 in place: `1 failed, 4 passed` -- the 400-only test recorded
-`meta_id=wamid.CONF1 status=sent`, i.e. setUp's stub answered a request its own test had stubbed as a
-refusal, and `wamid.CONF2` was never returned, which left the one-time-confirmation guard with no witness.
+Four facts, each read from vendor source in this install rather than inferred:
+
+1. `Factory::fake()` clears `$this->recorded` (Factory.php:260) but **merges** into `$this->stubCallbacks`
+   (Factory.php:275). Registering a stub twice therefore accumulates; it does not replace.
+2. `PendingRequest::buildStubHandler()` resolves with `->map->__invoke(...)->filter()->first()`
+   (PendingRequest.php:1512-1521). `first()` means **the earliest matching stub wins** and every later one
+   for the same URL pattern is dead code.
+3. `Http::preventStrayRequests()` is only a boolean flag (Factory.php:346-351). `StrayRequestException` is
+   thrown solely when *no* stub matched (PendingRequest.php:1523-1526). A `'*'` stub registered earlier
+   always matches, so a later `preventStrayRequests()` is **permanently inert** for that request.
+4. `Http::fake()` with **no arguments is not a no-op**: Factory.php:262-265 substitutes a
+   `return static::response()` closure, i.e. it appends its own 200-returning catch-all. So the idiom
+   `Http::fake(); Http::preventStrayRequests();` -- which appears in this plan's Task 12 block -- is
+   self-defeating even in a class with no setUp stub: the first call answers the request, the second can
+   therefore never fire. The correct way to assert "no request is made" is a bare
+   `Http::preventStrayRequests()` and nothing else.
+
+Consequence of 1 + 2: a `'*'` stub installed in `setUp()` is registered before any test body runs and
+shadows every `Http::fake()` that test makes. Measured with this plan's original Step 5 in place:
+`1 failed, 4 passed` -- the 400-only test recorded `meta_id=wamid.CONF1 status=sent`, i.e. setUp's stub
+answered a request its own test had stubbed as a refusal, and `wamid.CONF2` was never returned, which left
+the one-time-confirmation guard with no witness.
 Step 5 above is the corrected block. The rule for the rest of the plan: no stub in `setUp()`; a test that
 sends once calls `Http::fake()` with its own response; a test that can send more than once uses **one**
 `Http::sequence()` that pushes a distinct payload per send; and any class that can reach `WhatsAppSender`
@@ -3897,7 +3912,14 @@ class AckFlowTest extends TestCase
             'whatsapp.opt_out_text' => 'No more messages.',
         ]);
         Cache::flush();
-        Http::fake(fn () => Http::response(['messages' => [['id' => 'wamid.ACK' . uniqid()]]]));
+        // R41: no catch-all stub here. The first draft of this block installed
+        // Http::fake(fn () => ... 'wamid.ACK' . uniqid() ...) in setUp, which (a) shadows every in-test
+        // fake because stub callbacks merge and matching is first-registered-wins, and (b) gave every send
+        // a different id, so no test could witness *which* response it got -- a double-ack was caught only
+        // by the outbound-row counts. Each test below owns its stub; the two-send test uses one sequence
+        // with two distinct ids; and a test that must not send gets no stub at all, which
+        // preventStrayRequests turns into a failure rather than a socket.
+        Http::preventStrayRequests();
     }
 
     private function inbound(string $body, string $phone = '18479043315'): array
@@ -3912,16 +3934,22 @@ class AckFlowTest extends TestCase
 
     public function test_first_inbound_of_the_day_gets_one_ack()
     {
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.ACK1']]], 200)]);
         ProcessInboundEvent::dispatchSync($this->inbound('hello'));
 
         $ack = WaMessage::where('direction', WaMessage::OUT)->first();
         $this->assertNotNull($ack);
         $this->assertTrue($ack->auto_reply);
+        $this->assertSame('wamid.ACK1', $ack->meta_id);
         $this->assertStringContainsString('a human from E Tax Planner', $ack->body);
     }
 
     public function test_later_messages_same_day_get_nothing()
     {
+        // One stub, because exactly one send is expected. If the once-per-day rule broke, the second
+        // send would still be answered and the count below would fail -- but it would fail having tried
+        // to reach Meta twice, which is the thing this test exists to prevent.
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.ACK1']]], 200)]);
         ProcessInboundEvent::dispatchSync($this->inbound('hello'));
         ProcessInboundEvent::dispatchSync($this->inbound('and also?'));
         ProcessInboundEvent::dispatchSync($this->inbound('one more thing'));
@@ -3931,23 +3959,37 @@ class AckFlowTest extends TestCase
 
     public function test_a_different_contact_is_acknowledged_separately()
     {
+        // One sequence, two distinct ids: the cache key is per-contact, so a key that ignored the phone
+        // would produce one ack for two people. Asserting both ids present is what proves two different
+        // sends happened, where the row count alone could not tell an ack from a retry.
+        Http::fake(['*' => Http::sequence()
+            ->push(['messages' => [['id' => 'wamid.ACK1']]], 200)
+            ->push(['messages' => [['id' => 'wamid.ACK2']]], 200)]);
         ProcessInboundEvent::dispatchSync($this->inbound('hello', '18479043315'));
         ProcessInboundEvent::dispatchSync($this->inbound('hello', '19014307897'));
 
         $this->assertSame(2, WaMessage::where('direction', WaMessage::OUT)->count());
+        $this->assertDatabaseHas('wa_messages', ['meta_id' => 'wamid.ACK1']);
+        $this->assertDatabaseHas('wa_messages', ['meta_id' => 'wamid.ACK2']);
     }
 
     public function test_opt_out_message_is_not_acknowledged()
     {
+        // The only send this test allows is the opt-out confirmation, so it gets the only stub.
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.OPT1']]], 200)]);
         ProcessInboundEvent::dispatchSync($this->inbound('STOP'));
         // only the confirmation, no ack line
         $out = WaMessage::where('direction', WaMessage::OUT)->get();
         $this->assertCount(1, $out);
+        $this->assertSame('wamid.OPT1', $out->first()->meta_id);
         $this->assertStringContainsString('No more messages', $out->first()->body);
     }
 
     public function test_empty_ack_text_disables_the_rule()
     {
+        // Deliberately no Http::fake() here: setUp's preventStrayRequests() is what makes this test
+        // mean something. If the empty-text guard broke, the send would hit an unstubbed request and the
+        // test would fail with StrayRequestException rather than on the row count.
         config(['whatsapp.ack_text' => '']);
         ProcessInboundEvent::dispatchSync($this->inbound('hello'));
         $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
@@ -4876,11 +4918,16 @@ class InboxActionsTest extends TestCase
                 'whatsapp.header_images' => ['etp_opener_brand' => 'https://example.test/logo.png']]);
         $this->contact = WaContact::factory()->create(['phone' => '18479043315',
             'profile_name' => 'Jane Tester', 'last_inbound_at' => now()->subHour()]);
-        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.STAFF1']]], 200)]);
+        // R41: the first draft installed Http::fake(['*' => ... wamid.STAFF1 ...]) here, which shadowed
+        // the two in-test fakes below and made preventStrayRequests() inert for every request in the class
+        // (a '*' stub always matches, and the stray guard only fires when nothing matched). No stub here
+        // now; each sending test brings its own, and an unstubbed request fails the test.
+        Http::preventStrayRequests();
     }
 
     public function test_reply_inside_the_window_is_sent_and_stored()
     {
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.STAFF1']]], 200)]);
         $this->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'Happy to help.'])
             ->assertRedirect();
         $m = WaMessage::where('meta_id', 'wamid.STAFF1')->firstOrFail();
@@ -4892,9 +4939,9 @@ class InboxActionsTest extends TestCase
     public function test_reply_outside_the_window_is_refused_locally_without_calling_graph()
     {
         $this->contact->update(['last_inbound_at' => now()->subHours(30)]);
-        Http::fake();
-        Http::preventStrayRequests();
-
+        // No Http::fake() and no in-test preventStrayRequests(): setUp's guard is what makes the name
+        // true. If the window check broke, the controller would attempt a send, nothing would be stubbed,
+        // and this test would fail with StrayRequestException instead of quietly passing on a count.
         $this->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'late'])
             ->assertSessionHasErrors('window');
         $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
@@ -4908,6 +4955,7 @@ class InboxActionsTest extends TestCase
 
     public function test_template_can_be_sent_with_a_closed_window()
     {
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.STAFF1']]], 200)]);
         $this->contact->update(['last_inbound_at' => now()->subDays(3)]);
         $this->post('/inbox/' . $this->contact->id . '/template',
             ['template' => 'etp_opener_brand', 'language' => 'en', 'variables' => 'Jane'])->assertRedirect();
@@ -4921,8 +4969,8 @@ class InboxActionsTest extends TestCase
 
     public function test_only_approved_template_names_are_accepted()
     {
-        Http::fake();
-        Http::preventStrayRequests();
+        // No stub: an unapproved name must be refused before the sender is reached, and setUp's
+        // preventStrayRequests() turns any attempt into a failure rather than a silent 200.
         $this->post('/inbox/' . $this->contact->id . '/template',
             ['template' => 'made_up_template', 'language' => 'en', 'variables' => ''])->assertSessionHasErrors('template');
         $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
@@ -4930,6 +4978,8 @@ class InboxActionsTest extends TestCase
 
     public function test_nothing_can_be_sent_to_an_opted_out_contact()
     {
+        // No stub for the same reason as the two tests above: suppression is enforced locally, so an
+        // attempt to reach Graph here is a failure, not something to be answered.
         $this->contact->optOut('inbound_keyword');
 
         $this->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'hi'])
@@ -4945,6 +4995,12 @@ class InboxActionsTest extends TestCase
         $this->post('/inbox/' . $this->contact->id . '/opt-out')->assertRedirect();
         $this->assertTrue($this->contact->fresh()->isOptedOut());
         $this->assertSame('manual', $this->contact->fresh()->opt_out_source);
+        // The name promises more than the state change above proves, so the send attempt is part of the
+        // test: an opted-out thread must be refused before the sender runs. Without these two lines a
+        // regression that recorded the opt-out but kept sending would still pass.
+        $this->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'after'])
+            ->assertSessionHasErrors('window');
+        $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
     }
 
     public function test_a_guest_cannot_post_a_reply()
@@ -5026,17 +5082,26 @@ class InboxActionsTest extends TestCase
     Route::post('/inbox/{contact}/opt-out', [InboxController::class, 'optOut'])->name('inbox.optout');
 ```
 
-**R41 applies to this block and is NOT yet corrected here -- carry-forward for the Task 12 implementer.**
-The `setUp()` installs a `'*'` stub (`wamid.STAFF1`), and
-`test_reply_outside_the_window_is_refused_locally_without_calling_graph` then calls
-`Http::fake(); Http::preventStrayRequests();` intending to prove no HTTP request is attempted. Per R41 the
-setUp stub is registered first and wins, so that in-test pair is shadowed. The test is not vacuous --
-`assertSame(0, ...OUT...)` still fails if the window check breaks, because the setUp stub would answer 200
-and a row would be recorded -- but its stated promise, "without calling graph", is unverified. Correct it
-the R41 way: delete the setUp `'*'` stub, give each test that sends its own `Http::fake()` (one `sequence()`
-where a test can send twice), and keep `Http::preventStrayRequests()` in `setUp()` so an unstubbed request
-fails loudly instead of opening a socket. Then the window test proves what its name says. Scan every later
-task block for the same shape before running it.
+**R41 -- this block is corrected above, in the same pass that corrected Task 7's.** The first draft
+installed a `'*'` stub (`wamid.STAFF1`) in `setUp()` and then wrote
+`Http::fake(); Http::preventStrayRequests();` inside two tests intending to prove no HTTP request is
+attempted. Both halves of that pair are dead: the setUp stub matched first, and even on its own
+`Http::fake()` with no arguments appends *another* 200-returning catch-all (Factory.php:262-265), so the
+stray guard -- which fires only when nothing matched (PendingRequest.php:1523-1526) -- could never have
+thrown. The tests were not vacuous (`post()` records an OUT row even when Meta refuses, so the
+`assertSame(0, ...)` counts still bite), but their names promised something no assertion delivered. They
+now get what R41 prescribes: no stub in `setUp()`, `Http::preventStrayRequests()` in `setUp()`, a stub
+only in the two tests that really send, and the four refuse-tests send nothing.
+
+`test_manual_opt_out_stops_the_thread_from_sending` had the same disease in a different organ: it asserted
+`isOptedOut()` and `opt_out_source` and nothing else, so a regression that recorded the opt-out and kept
+sending would have passed a test whose name says "stops ... from sending". It now attempts the reply.
+
+A whole-plan sweep for this shape (Tasks 8-16, every `Http` fence) found only two affected classes: this
+one and Task 8's `AckFlowTest`, both corrected. Tasks 9, 10, 11, 13 and 14 use no `Http` facade at all;
+Task 15 is Python and mocks `urlopen` directly; Task 16 has no test fences.
+
+- [ ] **Step 5: Show the flash result in the thread view.** In `resources/views/inbox/thread.blade.php`, immediately after the `<h2 ...>` line add:
 
 - [ ] **Step 5: Show the flash result in the thread view.** In `resources/views/inbox/thread.blade.php`, immediately after the `<h2 ...>` line add:
 
@@ -5192,7 +5257,8 @@ class WaImportSendLog extends Command
             return 1;
         }
 
-        $contacts = $messages = $skipped = 0;
+        $messages = $skipped = 0;
+        $distinctPhones = [];
         $apply = (bool) $this->option('apply');
 
         while (($row = fgetcsv($handle)) !== false) {
@@ -5209,7 +5275,7 @@ class WaImportSendLog extends Command
                 continue;
             }
 
-            $contacts++;
+            $distinctPhones[$phone] = true;
             $messages++;
 
             if (!$apply) {
@@ -5228,12 +5294,13 @@ class WaImportSendLog extends Command
                 'type' => 'template',
                 'template_name' => $row['template'] ?? null,
                 'template_lang' => $row['language'] ?? null,
-                'status' => WaMessage::SENT,
+                'status' => ($row['status'] ?? '') === 'sent' ? WaMessage::SENT : WaMessage::FAILED,
                 'sent_at' => $sentAt,
                 'raw' => ['source' => 'send_log_import'],
             ]);
         }
         fclose($handle);
+        $contacts = count($distinctPhones);
 
         $this->line($apply ? "Imported {$messages} messages, {$contacts} contacts, {$skipped} skipped."
                            : "DRY RUN: would import {$messages} messages, {$contacts} contacts, {$skipped} skipped.");
@@ -5245,6 +5312,27 @@ class WaImportSendLog extends Command
     }
 }
 ```
+
+**R43 -- the importer counts contacts by distinct phone and reads the `status` column instead of
+assuming it.** Two corrections to the draft above, both found by a whole-plan sweep rather than by a
+failing test, which is why they are stated here instead of in a ruling about behaviour:
+
+1. `$contacts++` sat inside the per-row loop, so a number that appears in the log twice was counted as two
+   contacts while `WaContact::fromPhone()` produced one row. The summary line prints that number and Step 6
+   tells a human to compare it against `WaContact::count()`, so an inflated figure would read as a bug in
+   the database rather than in the counter. The log is written by a bench whose uniqueness cap is per-day,
+   so repeats across days are the normal case, not an edge case. `$distinctPhones[$phone] = true` and
+   `count($distinctPhones)` make the figure mean what the label says. The sample fixture uses two distinct
+   numbers, so no test here can catch this -- do not "strengthen" the fixture into the only witness.
+2. `'status' => WaMessage::SENT` hardcoded the outcome while the CSV has a `status` column. For the log as
+   the bench writes it today the hardcoding is not wrong: `append_log()` writes a `message_id` only on the
+   success path (sender_server.py:285), and every refusal path writes an empty id and is skipped by the
+   `wamid === ''` guard above it. So no row that survives to `record()` is anything but `sent`. But the
+   importer is the thing that will one day read a log written by something else, and a row that carries an
+   id and a failed status must not be imported as a delivery. `'status' => ($row['status'] ?? '') === 'sent'
+   ? WaMessage::SENT : WaMessage::FAILED` costs nothing and stops the importer from asserting an outcome it
+   never verified -- the same rule R34 applied to reading Meta's response: decide at the reader, do not
+   assume downstream.
 
 - [ ] **Step 5: Run the test**
 
@@ -5520,8 +5608,14 @@ class GateTest(unittest.TestCase):
         urls = [r.get_full_url() for r in seen]
         self.assertTrue(any(u.endswith("/wa/suppressions") for u in urls), urls)
         self.assertTrue(any(u.endswith("/inbound/record-send") for u in urls), urls)
-        headers = {k.lower(): v for r in seen for k, v in r.header_items()}
-        self.assertEqual(headers.get("authorization"), "Bearer tok")
+        # R44: assert the header per request. `{k: v for r in seen for k, v in r.header_items()}` merges
+        # both requests into one dict, so if record-send sent no Authorization header at all the value from
+        # the suppressions call would satisfy the assertion -- a green test proving the wrong thing.
+        for r in seen:
+            sent = {k.lower(): v for k, v in r.header_items()}
+            self.assertEqual(sent.get("authorization"), "Bearer tok",
+                "%s sent without the bearer header" % r.get_full_url())
+        self.assertEqual(len(seen), 2, "expected one suppressions read and one record-send write")
 
     def test_a_record_send_failure_does_not_undo_an_accepted_send(self):
         def fake_urlopen(req, timeout=None):
@@ -5539,11 +5633,39 @@ class GateTest(unittest.TestCase):
         self.assertTrue(res["ok"], "Meta accepted it; that fact must not be softened")
         self.assertIn("inbox record failed", res["note"])
 
-    def test_allow_list_still_wins_over_the_suppression_list(self):
-        verdict, why = s.check_gates("19998887777", {US2: "US test 2"}, set(), set(), set())
-        self.assertEqual(verdict, "refused")
-        self.assertIn("test_numbers.txt", why)
+    def test_the_suppression_list_beats_the_allow_list(self):
+        # R44: the number must be on BOTH lists or this proves nothing. Passing an empty `blocked` set --
+        # as the first draft did -- exercises only the allow-list branch and would still pass if the
+        # suppression check were deleted. Suppression wins: an opted-out contact is not messaged, even one
+        # we own a test handset for. Refusing an allow-listed number costs us a warm-up send; sending to a
+        # suppressed one costs the account its quality rating, and Meta's opt-out handling is audited.
+        verdict, why = s.check_gates(US2, {US2: "US test 2"}, set(), set(), {US2})
+        self.assertEqual(verdict, "refused", why)
+        self.assertIn("suppression list", why)
+        self.assertNotIn("test_numbers.txt", why)
 ```
+
+**R44 -- a test that names a policy must construct the case where the policy is the only thing that
+decides.** Found by the same whole-plan sweep that produced R41/R42/R43, in Task 15's Python gate tests,
+which R41 does not reach because they mock `urlopen` rather than using the `Http` facade. Two instances,
+both invisible to a green run:
+
+1. `test_allow_list_still_wins_over_the_suppression_list` called `check_gates(number, allowed, set(),
+   set(), set())` with an empty `blocked` set. With nothing on the suppression list the suppression branch
+   is never taken, so the test would pass unchanged if that branch were deleted -- and its name asserts a
+   winner between two lists that were never both in play. The name also states the wrong policy:
+   `check_gates` (Step 5) refuses anything on the suppression list even when it is allow-listed, which is
+   the compliance-correct ordering, so the test is now `test_the_suppression_list_beats_the_allow_list`,
+   puts the number on both lists, and asserts the refusal reason names the suppression list rather than
+   the allow-list file. Deleting the blocked check makes it fail; so does reordering the checks.
+2. `headers = {k.lower(): v for r in seen for k, v in r.header_items()}` flattens every recorded request
+   into one dict before asserting `authorization == "Bearer tok"`. Both requests carry that header, so a
+   regression that dropped it from `record-send` alone would still find the value from the suppressions
+   read and pass. Asserted per request now, with the request count pinned so a silently missing call
+   cannot hide behind a header that happens to be right.
+
+These are plan-code corrections; neither is verified by a run yet, because Task 15 is not implemented.
+Step 1's own expected result is a RED suite, so the first execution of this file confirms or refutes both.
 
 - [ ] **Step 2: Run it and watch it fail**
 
@@ -5632,7 +5754,14 @@ def check_gates(to, allowed, used, in24, blocked=frozenset()):
     return "ok", ""
 ```
 
-The default keeps the signature backward compatible, and the allow-list and length checks stay ahead of the suppression check so a refused number never reaches the inbox call in the message text.
+The default keeps the signature backward compatible, and the allow-list and length checks stay ahead of the
+suppression check so a number that is not on the allow-list is refused without its suppression status ever
+being consulted. Read that sentence narrowly: it orders the *checks*, not the *calls*. `send_one` fetches
+the suppression list first (Step 6), so every send attempt costs one inbox read even for a number the
+allow-list will refuse -- that is the price of fail-closed, and the fetch is cached for `SUPPRESSION_TTL`
+seconds so a warm-up burst pays it once. Do not "optimise" it by moving the fetch behind the allow-list
+check: then a number that is not allow-listed short-circuits, and the first-draft bug -- a `blocked` set
+that silently stayed empty -- becomes invisible instead of costly.
 
 - [ ] **Step 6: Gate `send_one`** (currently lines 268-287). Replace its body with:
 

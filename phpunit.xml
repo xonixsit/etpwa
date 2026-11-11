@@ -32,5 +32,15 @@
         <env name="PULSE_ENABLED" value="false"/>
         <env name="TELESCOPE_ENABLED" value="false"/>
         <env name="NIGHTWATCH_ENABLED" value="false"/>
+        <env name="WA_ACCESS_TOKEN" value=""/>
+        <env name="WA_APP_SECRET" value=""/>
+        <env name="WA_VERIFY_TOKEN" value=""/>
+        <env name="WA_EXPORT_TOKEN" value=""/>
+        <env name="WA_PHONE_ID" value=""/>
+        <env name="WA_MY_NUMBER" value=""/>
+        <env name="WA_TEMPLATE_CHOICES" value=""/>
+        <env name="WA_HEADER_IMAGE_ETP_OPENER_BRAND" value=""/>
+        <env name="WA_ACK_TEXT" value=""/>
+        <env name="WA_OPT_OUT_TEXT" value=""/>
     </php>
 </phpunit>

@@ -131,6 +131,26 @@ class OptOutFlowTest extends TestCase
         $this->assertSame(1, WaMessage::count(), 'the inbound STOP only -- no empty confirmation');
     }
 
+    public function test_the_one_time_rule_is_per_contact_not_global()
+    {
+        // R42/F-3: every other test in this class uses one phone, so a `wasSilenced` flag that was
+        // accidentally global -- one cache key, one static, one row consulted by contact id 1 -- would
+        // still pass all seven. Two contacts must each get their own confirmation.
+        Http::fake(['*' => Http::sequence()
+            ->push(['messages' => [['id' => 'wamid.CONF1']]], 200)
+            ->push(['messages' => [['id' => 'wamid.CONF2']]], 200)]);
+        ProcessInboundEvent::dispatchSync($this->inbound('STOP', 'wamid.S1'));
+        $other = $this->inbound('STOP', 'wamid.S2');
+        $other['phone'] = '19014307897';
+        ProcessInboundEvent::dispatchSync($other);
+
+        $this->assertTrue(WaContact::where('phone', '18479043315')->firstOrFail()->isOptedOut());
+        $this->assertTrue(WaContact::where('phone', '19014307897')->firstOrFail()->isOptedOut());
+        $this->assertSame(2, WaMessage::where('direction', WaMessage::OUT)->count());
+        $this->assertDatabaseHas('wa_messages', ['meta_id' => 'wamid.CONF1']);
+        $this->assertDatabaseHas('wa_messages', ['meta_id' => 'wamid.CONF2']);
+    }
+
     public function test_quick_reply_button_id_stops()
     {
         // Body text is not a keyword: only the button id can trigger this.

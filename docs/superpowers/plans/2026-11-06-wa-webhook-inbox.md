@@ -3488,7 +3488,7 @@ class OptOutKeywordsTest extends TestCase
         return [
             ['stop'], ['STOP'], [' Stop '], ['stop.'], ['end'], ['cancel'],
             ['unsubscribe'], ['opt out'], ['OPT-OUT'], ['optout'], ['quit'], ['remove'],
-            ['please STOP and email me'],
+            ['please STOP and email me'], ['stop, please'], ['STOP. I said it'],
         ];
     }
 
@@ -3526,11 +3526,22 @@ class OptOutKeywordsTest extends TestCase
         $this->assertFalse(OptOutKeywords::matches('anything', 'TALK_TO_AGENT'));
     }
 
+    /**
+     * R42: the trim() in the button branch is live behaviour -- a padded id is a real payload shape, not a
+     * theoretical one -- so it is pinned rather than left to a green suite that never sends one.
+     */
+    public function test_a_padded_button_id_still_matches()
+    {
+        $this->assertTrue(OptOutKeywords::matches(null, ' STOP '));
+        $this->assertTrue(OptOutKeywords::matches(null, "\tstop\n"));
+    }
+
     public static function phraseProvider(): array
     {
         return [
             ['I want to opt out now'], ['please opt out'], ['opt out please'],
             ['OPT OUT'], [' opt out.'], ['i want to opt out of these messages'],
+            ['opt me out'], ['opt me out please'], ['please opt me out of this'],
         ];
     }
 
@@ -3567,36 +3578,109 @@ class OptOutKeywordsTest extends TestCase
         $this->assertFalse(OptOutKeywords::matches($text));
     }
 
-    public function test_ambiguous_words_still_fire_when_they_are_the_whole_message()
+    public static function wholeMessageProvider(): array
     {
-        foreach (['end', 'remove', 'END', ' remove ', 'end.'] as $text) {
-            $this->assertTrue(OptOutKeywords::matches($text), "'{$text}' is a bare opt-out word");
-        }
+        return [['end'], ['remove'], ['END'], [' remove '], ['end.']];
     }
 
-    public function test_unambiguous_words_fire_anywhere_including_the_phrase_ones()
+    /** @dataProvider wholeMessageProvider */
+    public function test_ambiguous_words_still_fire_when_they_are_the_whole_message(string $text)
     {
-        foreach (['please STOP and email me', 'you can unsubscribe me now', 'cancel my plan',
-                       'I quit this service', 'optout of everything'] as $text) {
-            $this->assertTrue(OptOutKeywords::matches($text), "'{$text}' should suppress");
-        }
+        $this->assertTrue(OptOutKeywords::matches($text), "'{$text}' is a bare opt-out word");
+    }
+
+    public static function unambiguousAnywhereProvider(): array
+    {
+        return [
+            ['please STOP and email me'], ['you can unsubscribe me now'], ['cancel my plan'],
+            ['I quit this service'], ['optout of everything'],
+        ];
+    }
+
+    /** @dataProvider unambiguousAnywhereProvider */
+    public function test_unambiguous_words_fire_anywhere_including_the_phrase_ones(string $text)
+    {
+        $this->assertTrue(OptOutKeywords::matches($text), "'{$text}' should suppress");
     }
 
     /**
      * Reviewer F-4: iOS autocorrect and pasted text emit U+00A0 and friends, which an ASCII-only \s and
      * trim() do not see as separators -- so a space can hide the keyword. A hidden keyword is a missed
-     * opt-out, the unrecoverable direction, hence the Unicode-aware split. A space with no keyword in it
-     * must still be silent, which is the second half of the loop.
+     * opt-out, the unrecoverable direction, hence the Unicode-aware split.
+     *
+     * @dataProvider unicodeSpaceProvider
      */
-    public function test_unicode_spaces_do_not_hide_the_keyword()
+    public function test_unicode_spaces_do_not_hide_the_keyword(string $text)
     {
-        foreach (["\u{00A0}stop", "stop\u{00A0}sending", "opt\u{00A0}out", "\u{2009}stop",
-                       "\u{3000}unsubscribe", "please\u{00A0}opt out", "\u{00A0}end"] as $text) {
-            $this->assertTrue(OptOutKeywords::matches($text), 'a non-ASCII space must not hide the keyword');
-        }
-        foreach (["\u{00A0}hello there", "what\u{00A0}time do you end"] as $text) {
-            $this->assertFalse(OptOutKeywords::matches($text), 'normalising spaces must not invent a keyword');
-        }
+        $this->assertTrue(OptOutKeywords::matches($text), 'a non-ASCII space must not hide the keyword');
+    }
+
+    public static function unicodeSpaceProvider(): array
+    {
+        return [
+            ["\u{00A0}stop"], ["stop\u{00A0}sending"], ["opt\u{00A0}out"], ["\u{2009}stop"],
+            ["\u{3000}unsubscribe"], ["please\u{00A0}opt out"], ["\u{00A0}end"],
+        ];
+    }
+
+    /** @dataProvider unicodeSpaceSafeProvider */
+    public function test_a_non_ascii_space_alone_does_not_invent_a_keyword(string $text)
+    {
+        $this->assertFalse(OptOutKeywords::matches($text), 'normalising spaces must not invent a keyword');
+    }
+
+    public static function unicodeSpaceSafeProvider(): array
+    {
+        return [["\u{00A0}hello there"], ["what\u{00A0}time do you end"]];
+    }
+
+    /**
+     * R47: F-4 made the split Unicode-aware but left the punctuation strips byte-level, so the same
+     * missed-opt-out class survives one axis over. iOS autocorrect converts straight quotes to curly ones
+     * unasked, and a trailing "…" is a common way to end a one-word message. A byte-level strip cannot see
+     * either, and for `end`/`remove` one stray mark defeats the whole-message tier as well as the word
+     * scan, because the token no longer equals the keyword.
+     *
+     * @dataProvider unicodePunctuationProvider
+     */
+    public function test_unicode_punctuation_does_not_hide_the_keyword(string $text)
+    {
+        $this->assertTrue(OptOutKeywords::matches($text), 'a non-ASCII mark must not hide the keyword');
+    }
+
+    public static function unicodePunctuationProvider(): array
+    {
+        return [
+            ["stop\u{2026}"], ["\u{201C}stop\u{201D}"], ["end\u{2026}"],
+            ["end\u{3002}"], ["remove\u{2011}"], ["\u{201C}remove\u{201D}"],
+        ];
+    }
+
+    /** @dataProvider unicodePunctuationSafeProvider */
+    public function test_stripping_non_ascii_marks_does_not_invent_a_keyword(string $text)
+    {
+        $this->assertFalse(OptOutKeywords::matches($text), 'normalising punctuation must not invent a keyword');
+    }
+
+    public static function unicodePunctuationSafeProvider(): array
+    {
+        return [
+            ["\u{201C}hello\u{201D}"], ['stopwatch.'], ["removal\u{2026}"],
+            ["\u{2026}end of month"], ['options?'],
+        ];
+    }
+
+    /**
+     * R42: the `?: []` fallback in the tokeniser is reachable, not defensive decoration -- a handset can
+     * put bytes that are not valid UTF-8 on the wire and preg_split('/\s+/u', ...) returns false for them.
+     * Undecodable text cannot be read as an opt-out, so the honest outcome is "no keyword": that leaves the
+     * message for a human instead of throwing inside the queued job, and it is the direction a client can
+     * still be replied to in the thread.
+     */
+    public function test_text_that_is_not_valid_utf8_neither_matches_nor_throws()
+    {
+        $this->assertFalse(OptOutKeywords::matches("\xFF\xFE stop"));
+        $this->assertFalse(OptOutKeywords::matches("\xC3\x28 end"));
     }
 }
 ```
@@ -3617,8 +3701,8 @@ class OptOutKeywords
     /** Words that only ever read as an opt-out request, wherever they sit in the line. */
     public const KEYWORDS = ['stop', 'cancel', 'unsubscribe', 'opt-out', 'optout', 'quit'];
 
-    /** Word pairs that mean opt-out only together, in this order. */
-    public const PHRASES = [['opt', 'out']];
+    /** Word sequences that mean opt-out only together, in this order. */
+    public const PHRASES = [['opt', 'out'], ['opt', 'me', 'out']];
 
     /** Ordinary English in a tax conversation, so they count only as the whole message. */
     public const WHOLE_MESSAGE = ['end', 'remove'];
@@ -3630,11 +3714,8 @@ class OptOutKeywords
         }
 
         $text = trim((string) $text);
-        if ($text === '') {
-            return false;
-        }
 
-        $first = strtolower(trim(trim((string) strtok($text, "\n")), " \t.,!?;:'\""));
+        $first = strtolower((string) strtok($text, "\n"));
         $words = self::words($first);
 
         foreach ($words as $word) {
@@ -3657,12 +3738,15 @@ class OptOutKeywords
      */
     private static function words(string $line): array
     {
-        // The /u is load-bearing: without it \s is ASCII-only and a U+00A0 from iOS autocorrect glues
-        // "stop" to its neighbour, hiding the keyword. A hidden keyword silences nobody.
-        $raw = preg_split('/\s+/u', $line) ?: [];
+        // Both /u modifiers are load-bearing, and each closes a different way a mark can hide a keyword:
+        // without the split's, an iOS U+00A0 glues "stop" to its neighbour; without the strip's, a curly
+        // quote or a trailing "…" does the same to the token itself -- and a mark that spoils the token
+        // also spoils the one-word whole-message tier, so "end…" is lost twice over. A hidden keyword
+        // silences nobody, which is the unrecoverable direction; stripping only at token boundaries keeps
+        // whole-word discipline, so "stopped", "removal" and "xopt outx" stay silent.
         $clean = [];
-        foreach ($raw as $word) {
-            $word = trim($word, " \t.,!?;:'\"");
+        foreach (preg_split('/\s+/u', $line) ?: [] as $token) {
+            $word = preg_replace('/^[\p{P}\p{S}]+|[\p{P}\p{S}]+$/u', '', $token);
             if ($word !== '') {
                 $clean[] = $word;
             }
@@ -3678,10 +3762,9 @@ class OptOutKeywords
     private static function containsSequence(array $words, array $sequence): bool
     {
         $span = count($sequence);
-        if (count($words) < $span) {
-            return false;
-        }
 
+        // The bound itself is the length guard: when $span exceeds the line, `0 <= count - $span` is
+        // false and the loop never runs.
         for ($i = 0; $i <= count($words) - $span; $i++) {
             if (array_slice($words, $i, $span) === $sequence) {
                 return true;
@@ -3699,9 +3782,9 @@ class OptOutKeywords
 php artisan test tests/Unit/OptOutKeywordsTest.php
 ```
 
-Expected: 43 passed (62 assertions).
+Expected: 77 passed (82 assertions).
 
-The matcher is tiered, not a single flat list -- **R45** below is the ruling and the measurements behind it. `stop`, `cancel`, `unsubscribe`, `opt-out`, `optout`, `quit` and the phrase `opt out` match anywhere in the first line; `end` and `remove` only when they are the whole message; a non-ASCII space never hides any of them. So "i want to stop paying taxes" and "cancel my filing" suppress, and "does the fiscal year end in december" does not. Suppression blocks outbound sends only -- the inbound message is still stored and still visible in the thread, so a human can read it and call them. A missed opt-out has no such recovery path, which is why the ambiguous words got the tighter tier rather than the phrase getting the looser one.
+The matcher is tiered, not a single flat list -- **R45** below is the ruling and the measurements behind it. `stop`, `cancel`, `unsubscribe`, `opt-out`, `optout`, `quit` and the phrases `opt out` and `opt me out` match anywhere in the first line; `end` and `remove` only when they are the whole message; neither a non-ASCII space nor a non-ASCII mark around a word hides any of them (R45 opened that axis for spaces, **R47** closed it for punctuation and replaced the two byte-level punctuation strips with one Unicode-aware layer). So "i want to stop paying taxes" and "cancel my filing" suppress, and "does the fiscal year end in december" does not. Suppression blocks outbound sends only -- the inbound message is still stored and still visible in the thread, so a human can read it and call them. A missed opt-out has no such recovery path, which is why the ambiguous words got the tighter tier rather than the phrase getting the looser one.
 
 - [ ] **Step 5: Write the failing feature test** — `tests/Feature/OptOutFlowTest.php`
 
@@ -4019,10 +4102,13 @@ cost of keeping an unambiguous STOP-family verb in the anywhere tier.
 F-4 folded into the same edit: `preg_split('/\s+/', ...)` is ASCII-only and iOS autocorrect emits U+00A0.
 Before: `"\u{00A0}stop"` → no, `"stop\u{00A0}sending"` → no, `"opt\u{00A0}out"` → no. The `u` modifier makes
 `\s` Unicode-aware in PHP's PCRE (verified directly: `preg_split('/\s+/u', "\u{00A0}stop\u{2009}sending")` →
-`['', 'stop', 'sending']`; the same pattern without `u` → one glued token). One character moves three more
-shapes out of "missed opt-out". **Not adopted:** a zero-width joiner *inside* a word (`"zo\u{200D}pt out"`)
+`['', 'stop', 'sending']`; the same pattern without `u` → one glued token). The `u` moves every
+pinned positive shape on that axis -- seven of seven -- from miss to hit ("three" was a mis-count in this
+ruling; corrected by R47). **Not adopted:** a zero-width joiner *inside* a word (`"zo\u{200D}pt out"`)
 still does not match -- deleting a client's characters to manufacture a keyword is a different act from
-treating a space as a space. Recorded as a known limit.
+treating a space as a space. Recorded as a known limit. **R47 note:** the same byte-level argument that made
+this `u` necessary was left unapplied to the two punctuation strips, and that gap was real; it is closed in
+R47, so the zero-width case below is now the only "not adopted" survivor.
 
 **Known limits of the tier, measured on the shipped matcher and NOT re-litigated with the owner.** The
 whole-message tier silences nobody for `"end now"`, `"remove me"`, `"please remove"`,
@@ -4038,13 +4124,20 @@ Spec §9's opt-out bullet is amended to this ruling in the same commit; it previ
 whose algorithm made `opt out` unreachable, and leaving the two documents disagreeing is what R45 exists to
 stop.
 
-Witnesses and mutations, all re-run on these files with `landed=` proof and restore verified byte-identical:
+**R47 supersedes the "Known limits" list above.** That list was narrower than the code: it omitted the phrase
+tier's own miss class (`"opt me out"`), the whole punctuation axis, and a false-positive family the owner
+would care about (`"stop payment request"`). The complete measured table is in R47 and that, not this
+paragraph, is the artifact that goes to the account owner.
+
+Witnesses and mutations, all re-run on these files with `landed=` proof and restore verified
+byte-identical. **Row counts in this table are R45-era (43 unit rows); after R47 the same mutations are
+re-measured against 77 rows in the R47 table below.**
 
 | mutation | observed failure |
 | --- | --- |
 | K1 word tier → `foreach ([]) as $word` | 13 of 43 unit rows |
 | K2 phrase tier → `foreach ([]) as $phrase` | 8 rows |
-| K3 whole-message tier → matches at any position | 2 rows (`test_ambiguous_words_do_not_fire_mid_sentence`) |
+| K3 whole-message tier → matches at any position | **corrected by R47: 7 rows, not 2.** `2` is the count for a strictly weaker mutation that keeps testing `$words[0]` and only drops the count conjunct |
 | K4 whole-message tier → `return false` | 4 rows |
 | K5 `/\s+/u` → `/\s+/` | 1 row (`test_unicode_spaces_do_not_hide_the_keyword`) |
 | G1 `$wasSilenced = $contact->isOptedOut()` → global read | 1 of 8 feature tests -- `test_the_one_time_rule_is_per_contact_not_global` |
@@ -4055,7 +4148,109 @@ hypothetical global "already confirmed once" flag (with the per-contact read rep
 `WaContact::whereNotNull('opted_out_at')->exists()`, 7 of 8 stay green).
 
 Counts after this round: unit 43 passed (62 assertions), `OptOutFlowTest` 8 passed (21 assertions), full
-suite **124 passed (323 assertions)**.
+suite **124 passed (323 assertions)**. (Superseded by R47: unit 77 / 82, feature 8 / 21, full 158 / 343.)
+
+**R47 -- the punctuation strip was still byte-level, and the phrase tier missed the commonest phrasing of
+its own intent.** Round 2 of the Task 7 review returned "ship the code, fix the ledger": nothing shipped was
+wrong, but two axes of the matcher were narrower than the ruling claimed. Both were reproduced against the
+shipped file before being adopted -- `php C:/Users/Hp/AppData/Local/Temp/t6/shapecheck.php`, read-only -- and
+both came back exactly as reported: `stop…`, `“stop”`, `end…`, `end。`, `remove‑` and `“remove”` → no, while
+R45's ASCII forms `stop.` and `stop!` → HIT; and `opt me out`, `opt me out please` and
+`please opt me out of this` → no, while the adjacent `opt out` → HIT.
+
+**Finding R-1 (Important, adopted).** R45 made the *split* Unicode-aware and left both *strips* ASCII, so the
+same missed-opt-out class survived one axis over. iOS autocorrect converts straight quotes to curly ones
+unasked and `…` is a common way to end a one-word message; for `end`/`remove` one stray mark defeats the token
+*and* the `count($words) === 1` test, so the whole-message tier cannot rescue it either. Fixed by deleting the
+redundant outer strip and making the per-token strip the single normalisation layer:
+`preg_replace('/^[\p{P}\p{S}]+|[\p{P}\p{S}]+$/u', '', $token)`. Boundary-only application keeps whole-word
+discipline, which is why `stopped`, `stopwatch`, `nonstop`, `removal`, `options` and `xopt outx` are all still
+silent. This also removes a mutant that round 2 flagged: the two strips were individually deletable with a
+green suite, and the one carrying mid-line punctuation was the unwitnessed one.
+
+**Finding R-2 (Important, adopted).** `containsSequence()` required `opt` and `out` to be adjacent, so the
+English dative -- "opt **me** out" -- could not match. That is the same intent one word apart, and it is
+plausibly the commonest real phrasing of what R45 was written to catch. `PHRASES` += `['opt','me','out']`.
+
+| tier | entries | rule |
+| --- | --- | --- |
+| word, anywhere in the first line | `stop`, `cancel`, `unsubscribe`, `opt-out`, `optout`, `quit` | some word equals it |
+| phrase, anywhere in the first line | `opt out`, `opt me out` | consecutive words equal the run, in order |
+| whole message only | `end`, `remove` | the line is that one word and nothing else |
+| button | `button_id` = `stop` | unchanged (R39), now pinned padded |
+
+**The complete measured shape table -- this is the artifact for the account owner.** 76 shapes, generated by
+`php C:/Users/Hp/AppData/Local/Temp/t6/table47.php` against the shipped class; 0 of 76 disagree with their
+intended class. Counts: 33 requests caught, 13 missed opt-outs, 10 false hits, 20 correct silences.
+
+*Caught* (all HIT, and these are the ones R45+R47 moved out of the miss column): `stop`, `STOP`, `stop.`,
+` stop `, `stop, please`, `STOP. I said it`, `unsubscribe`, `cancel`, `quit`, `opt-out`, `optout`, `end`,
+`remove`, `end.`, ` remove `, `opt out`, `OPT OUT`, ` opt out.`, `I want to opt out now`, **`opt me out`**,
+**`opt me out please`**, **`please opt me out of this`**, **`stop…`**, **`“stop”`**, **`end…`**, **`end。`**,
+**`remove‑`**, **`“remove”`**, and the four non-ASCII-space forms.
+
+*Missed opt-outs* -- a client who asked to be silenced keeps getting messages, which is the direction with no
+recovery path. The first six are a **design floor, not a bug**: `end` and `remove` are ordinary English in a
+tax practice, and the owner chose the tighter tier for them.
+
+| shape | why it misses |
+| --- | --- |
+| `end now`, `remove me`, `please remove`, `please remove me`, `kindly remove me from this list`, `I want to end this` | whole-message tier requires exactly one word |
+| `opting out` | no stemming; the lemma is not in any set |
+| `I'd like to be removed` | `removed` is not `remove` |
+| `delete my number`, `no more messages please`, `dont message me again` | free-text intent outside any fixed set |
+| `opt.out` | punctuation *inside* a token is not glued; see W14 |
+| a first line that is not valid UTF-8 | undecodable text cannot be read as an opt-out; it is stored for a human |
+
+*False hits* -- a client is silently silenced who did not ask. Visible in the thread and reversible, which is
+why the tier is allowed to err here.
+
+| shape | why it fires |
+| --- | --- |
+| `the opt out link is broken`, `what is an opt out`, `do not opt out of the survey`, `my friend wants to opt out` | the phrase tier reads intent from words, not negation or person |
+| `please opt me out of this survey for me` | **new in R47** -- the 3-word run is the price of catching `opt me out` |
+| `stop payment request`, `stop by the office`, `the bus stop is near` | `stop` is in the anywhere tier; "stop payment" is a standing instruction in an accounting practice |
+| `cancel my filing later`, `I quit the gym` | same, for `cancel` and `quit` |
+
+The knob if the owner wants any of these moved is one word between `WHOLE_MESSAGE` and `KEYWORDS`, or one
+phrase added to or removed from `PHRASES` -- no structural change, and the providers make the test update
+mechanical.
+
+**R-4 to R-9 dispositions.** R-4: the two unwitnessed live behaviours are now pinned (`stop, please` and
+`STOP. I said it` in `keywordProvider`, and `test_a_padded_button_id_still_matches`); the redundant outer
+punctuation strip is deleted rather than noted, and the two provably-equivalent guards were measured and
+recorded (W4, W14 below). R-5: no finding. R-6: the Task 12 note cited a section that does not exist --
+corrected to spec §14 "Errors and edge cases worth naming", lines 246-247 (verified: §13 is Configuration at
+232, §15 is Testing at 255, and 242-243 is the 24-hour-window bullet). R-7: the "three shapes" prose is
+corrected above. R-8: the three multi-shape `foreach` tests are now `@dataProvider`s, so every row count in
+this ledger is a count of shapes and not of methods. R-9: the two Task 16 checklist lines are added to Task 16
+Step 6, so the limits list and the empty-`WA_OPT_OUT_TEXT` behaviour can no longer fall between the documents.
+
+Witnesses and mutations, re-run on these files with `landed=` proof and restore verified byte-identical
+(`node .superpowers/sdd/2026-11-06-wa-webhook-inbox/mut7g.mjs unit` and the same with `full`). Baseline before
+the battery: 77 unit rows / 82 assertions and 158 tests / 343 assertions.
+
+| mutation | unit | full | note |
+| --- | --- | --- | --- |
+| W1 token punctuation strip → no-op | 11 | 11 | carries the ASCII *and* Unicode axes, because the outer strip is gone |
+| W17 token strip → the old byte-level `trim` | 6 | 6 | **the R-1 witness**: exactly the 6 Unicode-punctuation rows |
+| W3 strip loses `/u` | 6 | 6 | same 6 rows, one character |
+| W2 split loses `/u` | 48 + 28 warnings | 61 + 28 | lethal, and noisy |
+| W7 word tier → `false` | 24 | 29 | |
+| W8 phrase loop emptied | 12 | 12 | |
+| W9 drop `['opt','me','out']` | 3 | 3 | **the R-2 witness**: the 3 dative rows |
+| W10 whole-message tier → `return false` | 12 | 12 | |
+| W11 whole-message → genuine any-position scan | 8 | 8 | R45's "2" was wrong (R-3) |
+| W12 → drop only the count conjunct | 3 + 4 warnings | 3 + 4 | this is the mutation the "2" actually described |
+| W13 button `trim` removed | 1 | 1 | the new pin works |
+| W15 first-line selection removed | 1 | 1 | |
+| W16 `containsSequence` window → whole-array compare | 7 | 7 | |
+| W4 drop the `preg_split` `?: []` fallback | 1 warning, 0 failed | 1 warning, 0 failed | reachable on a real payload (verified: `preg_split('/\s+/u', "\xFF\xFE stop")` → `false`), but PHPUnit 11 records it as a warning, not a failure. Guard kept; the witness is the warning. Making it red needs `failOnWarning="true"` in `phpunit.xml`, which is a suite-wide config change and is **carried to Task 14** rather than done here |
+| W14 strip unanchored (punctuation anywhere in the token) | **0 failed, 158 passed** | 0 failed | genuinely equivalent under every pinned shape. The only input that separates it is a glued form like `opt.out`, which would *widen* matching; there is no evidence for that phrasing, so it is recorded as a miss in the table above rather than coded for |
+
+Counts after this round: unit **77 passed (82 assertions)**, `OptOutFlowTest` **8 passed (21 assertions)**,
+full suite **158 passed (343 assertions)**. `AutoResponder.php` was not touched by this round; the seam at
+`:35-37` is still Task 8's and still inert.
 
 - [ ] **Step 8: Wire the job to the responder.** In `app/Jobs/ProcessInboundEvent.php`, replace the line `// Task 7 adds the automatic-response call here.` with:
 
@@ -4072,7 +4267,8 @@ php artisan test tests/Feature/OptOutFlowTest.php
 ```
 
 Expected: 8 passed (21 assertions) -- the 5 opt-out flows, the 2 R42 witnesses, and the R45/F-3
-per-contact test. Full suite at this step: 124 passed (323 assertions).
+per-contact test. Full suite at this step: 158 passed (343 assertions) — R47 raised it from the 124/323 the
+R45 round recorded, by 33 provider rows and one new test method, with no existing row changing verdict.
 
 - [ ] **Step 10: Commit**
 
@@ -4329,7 +4525,7 @@ the `where('id', '!=', $in->id)` exclusion survived the edit -- that is R46's fa
 php artisan test
 ```
 
-Expected: **131 passed** (the 124 that Task 7 closed on, plus this task's 7), no warnings. Report the
+Expected: **165 passed** (the 158 that Task 7 closed on after R47, plus this task's 7), no warnings. Report the
 assertion count you observe; it is what the next task's brief will quote. Then, per R42, mutate every guard
 this task adds -- the `$text === ''` return, the `$alreadyTalking` return, the `Cache::add` return, the
 `isOptedOut()` return, and the `where('id', '!=', $in->id)` exclusion -- and record which test fails for
@@ -5418,7 +5614,9 @@ git add app/Http/Controllers/InboxController.php resources/views/inbox/thread.bl
 git commit -m "feat: staff reply, template send and manual opt-out"
 ```
 
-**Open for Task 12, carried from the Task 7 review.** Spec §Risk table, lines 242-243, says an
+**Open for Task 12, carried from the Task 7 review.** Spec §14 "Errors and edge cases worth naming", lines
+246-247 (the citation previously read "§Risk table, lines 242-243", which is the 24-hour-window bullet and not
+this one -- fixed in the R47 round), says an
 in-flight send to a contact who opted out "is refused at the gate in `WhatsAppSender`, which re-reads
 `opted_out_at` in the same transaction that writes the row." The shipped `WhatsAppSender` has no such read
 (verified in this worktree: a grep for `opted_out` and `isOptedOut` in `app/Services/WhatsAppSender.php`
@@ -6244,8 +6442,15 @@ Expected: `401`.
 6. Send `STOP` from the handset. Expected: `opted out` badge, one confirmation, and the contact listed by `GET /wa/suppressions`.
 7. From the bench, try to send that same number again. Expected: `refused`, error naming the suppression list, nothing sent to Meta.
 8. Stop the inbox app (or set `SENDER_INBOX` at a dead port) and try any send. Expected: `refused` with "suppression list unreachable". No send may succeed while the list is unreadable.
+9. **Opt-out phrasing sign-off (R47).** Read the account owner the measured shape table in Task 7's R47 ruling --
+   33 caught, 13 missed opt-outs, 10 false hits, 20 correct silences -- and get an explicit yes or a requested
+   change before the first campaign send. The knobs are one word between `WHOLE_MESSAGE` and `KEYWORDS`, or a
+   `PHRASES` entry; no structural change. Do not send to a number that is not on the allow list while doing this.
+10. **Empty `WA_OPT_OUT_TEXT` behaviour (R42).** With the confirmation text unset, an opt-out is still
+    *suppressed* but no confirmation is sent, silently. Check the key is set on the host before go-live, or
+    expect silenced clients who were never told they were silenced.
 
-- [ ] **Step 6: Record the outcome** in `docs/DEPLOY.md` — the eight lines above, each marked pass or fail with what was seen, then commit:
+- [ ] **Step 6: Record the outcome** in `docs/DEPLOY.md` — the ten lines above, each marked pass or fail with what was seen, then commit:
 
 ```bash
 cd /d/etp-wa-inbox && git add docs/DEPLOY.md && git commit -m "docs: deploy and live acceptance record"

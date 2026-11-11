@@ -167,14 +167,14 @@ here; this app has its own key.
 
 Both run in the queued job, after the inbound row is stored.
 
-- **Opt-out.** The first line of an inbound text message is lowercased, stripped of surrounding
-  punctuation and split on whitespace — Unicode-aware, so a U+00A0 from an iOS keyboard is still a
-  separator. Matching is tiered (plan ruling R45, which replaced this section's original single flat set
-  after a review found that a two-word entry can never equal a word): the words `stop`, `cancel`,
-  `unsubscribe`, `opt-out`, `optout`, `quit`, plus the two-word phrase `opt out` in that order, count
-  anywhere in the line (so "please STOP and email me" and "I want to opt out now" both count), while
-  `end` and `remove` count only when the whole message is that one word — in a filing conversation
-  "does the fiscal year end in december" is a question, not an opt-out. A Meta `interactive` button
+- **Opt-out.** The first line of an inbound text message is lowercased and split on whitespace, and each
+  word has its surrounding punctuation stripped — both Unicode-aware, so an iOS U+00A0 is still a separator
+  and a curly quote or a trailing "…" around a word does not hide it. Matching is tiered (R45 and R47: R45
+  replaced this section's original flat set after a review found a two-word entry can never equal a word,
+  R47 closed the same defect on punctuation and for the dative phrasing): the words `stop`, `cancel`,
+  `unsubscribe`, `opt-out`, `optout`, `quit`, plus the phrases `opt out` and `opt me out` in that word
+  order, count anywhere in the line, while `end` and `remove` count only when the whole message is that one
+  word — "does the fiscal year end in december" is a question. The measured shape list is in plan R47. A Meta `interactive` button
   reply whose id is `STOP` counts too. Then: set `opted_out_at`,
   `opt_out_source = inbound_keyword`, and send one free-form confirmation — "You won't get any more
   messages from us on this number." Suppression is applied in the same job, before the send is

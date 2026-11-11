@@ -4095,7 +4095,10 @@ git commit -m "feat: STOP-family opt-out with a one-time confirmation"
 namespace Tests\Feature;
 
 use App\Jobs\ProcessInboundEvent;
+use App\Models\WaContact;
 use App\Models\WaMessage;
+use Carbon\Carbon;
+use Carbon\CarbonInterface;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -4125,13 +4128,16 @@ class AckFlowTest extends TestCase
         Http::preventStrayRequests();
     }
 
-    private function inbound(string $body, string $phone = '18479043315'): array
+    private function inbound(string $body, string $phone = '18479043315', ?CarbonInterface $at = null): array
     {
+        // R46: the third parameter exists because two of the tests below have to put two messages in the
+        // same second. A helper that always stamps now() cannot express that, and now() differs by
+        // microseconds between two dispatchSync calls.
         return [
             'kind' => 'message', 'meta_id' => 'wamid.' . uniqid(), 'phone' => $phone,
             'direction' => WaMessage::IN, 'type' => 'text', 'text' => $body,
             'button_id' => null, 'template_name' => null, 'template_lang' => null,
-            'sent_at' => now(), 'raw' => ['text' => ['body' => $body]],
+            'sent_at' => $at ?? now(), 'raw' => ['text' => ['body' => $body]],
         ];
     }
 
@@ -4197,22 +4203,55 @@ class AckFlowTest extends TestCase
         ProcessInboundEvent::dispatchSync($this->inbound('hello'));
         $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
     }
+
+    public function test_two_messages_in_the_same_second_produce_one_ack()
+    {
+        // R46: the case the deliverable names -- two callbacks in one second. The sequence stub makes a
+        // second send observable by id rather than only by a count, so a regression that sends twice shows
+        // up as wamid.ACK2 in the table instead of a number that could be explained away.
+        Http::fake(['*' => Http::sequence()
+            ->push(['messages' => [['id' => 'wamid.ACK1']]], 200)
+            ->push(['messages' => [['id' => 'wamid.ACK2']]], 200)]);
+        $at = Carbon::parse('2026-11-11 09:00:00', 'UTC');
+        ProcessInboundEvent::dispatchSync($this->inbound('hello', '18479043315', $at));
+        ProcessInboundEvent::dispatchSync($this->inbound('and one more', '18479043315', $at));
+
+        $this->assertSame(1, WaMessage::where('direction', WaMessage::OUT)->count());
+        $this->assertDatabaseHas('wa_messages', ['meta_id' => 'wamid.ACK1']);
+        $this->assertDatabaseMissing('wa_messages', ['meta_id' => 'wamid.ACK2']);
+    }
+
+    public function test_a_claimed_cache_key_is_what_stands_the_callback_down()
+    {
+        // R42/R46: Cache::add is the decider in exactly one state -- no earlier inbound row inside the
+        // window for this contact, but the ack already claimed. sync dispatch cannot interleave two jobs,
+        // so that state is manufactured here rather than left untested. Deliberately no Http::fake(): if
+        // the guard broke, the send would hit an unstubbed request and preventStrayRequests would fail
+        // the test, which is the witness. This test does NOT prove atomicity -- see R46 for why no test
+        // can, with CACHE_STORE=array.
+        $contact = WaContact::factory()->create(['phone' => '18479043315']);
+        Cache::add('wa-ack-' . $contact->id, 1, now()->addHours(24));
+        ProcessInboundEvent::dispatchSync($this->inbound('hello'));
+
+        $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
+        $this->assertSame(1, WaMessage::where('direction', WaMessage::IN)->count());
+    }
 }
 ```
 
 - [ ] **Step 2: Run it** — expected FAIL (0 outbound rows found).
 
-- [ ] **Step 3: Extend `AutoResponder`** — replace the trailing `if ($contact->isOptedOut()) { return; }` in `handle()` with the acknowledgement rule, and add the imports `use Illuminate\Support\Facades\Cache;` and `use Carbon\CarbonInterface;`:
+- [ ] **Step 3: Extend `AutoResponder`** — replace the trailing `if ($contact->isOptedOut()) { return; }` in `handle()` with the acknowledgement rule, and add the import `use Illuminate\Support\Facades\Cache;` (`WaContact`, `WaMessage` and `WhatsAppSender` are already imported by Task 7). The block below is the **corrected** version: R46 found that the first draft suppressed every ack.
 
 ```php
         if ($contact->isOptedOut()) {
             return;
         }
 
-        $this->acknowledge($contact, $in->sent_at);
+        $this->acknowledge($contact, $in);
     }
 
-    private function acknowledge(\App\Models\WaContact $contact, CarbonInterface $at): void
+    private function acknowledge(WaContact $contact, WaMessage $in): void
     {
         $text = (string) config('whatsapp.ack_text', '');
         if ($text === '') {
@@ -4220,9 +4259,14 @@ class AckFlowTest extends TestCase
         }
 
         $hours = (int) config('whatsapp.window_hours', 24);
+        $at = $in->sent_at;
 
+        // R46: exclude the row this job just wrote. ProcessInboundEvent stores the inbound before it
+        // calls the responder, so without this the window query finds the message's own row and no ack
+        // is ever sent. Measured, not reasoned about.
         $alreadyTalking = WaMessage::where('wa_contact_id', $contact->id)
             ->where('direction', WaMessage::IN)
+            ->where('id', '!=', $in->id)
             ->where('sent_at', '>=', $at->copy()->subHours($hours))
             ->where('sent_at', '<', $at->copy()->addSecond())
             ->exists();
@@ -4230,7 +4274,7 @@ class AckFlowTest extends TestCase
             return;
         }
 
-        // Atomic add: two callbacks in the same second cannot both send.
+        // The race guard. Atomic on the production store, not on the test store -- see R46.
         if (!Cache::add('wa-ack-' . $contact->id, 1, now()->addHours($hours))) {
             return;
         }
@@ -4239,13 +4283,45 @@ class AckFlowTest extends TestCase
     }
 ```
 
+**R46 -- the window query must exclude the message's own row, and the cache guard ships with a
+manufactured witness because nothing else can reach it.** Two measurements, both before this task was
+implemented.
+
+1. `ProcessInboundEvent::handle()` stores the inbound row at `app/Jobs/ProcessInboundEvent.php:65` and
+   only then calls the responder (`:74`) -- that ordering is the spec's ("both run in the queued job, after
+   the inbound row is stored"). So the Step 3 draft, which asked "is there an inbound in the last 24 hours"
+   without excluding the current row, always answers yes. Measured against the local MariaDB in a
+   transaction that was rolled back afterwards (`rows_in_table_before=0 after=1`, then `rolled_back, rows
+   now=0`, `probe_contact_still_exists=false`): **`plan_query_matches_own_row=true`**, and the same query
+   with `->where('id', '!=', $row->id)` → `excluding_own_row=false`. Consequence: the first draft of this
+   task fails its own Step 1 test `test_first_inbound_of_the_day_gets_one_ack` and would silence the
+   acknowledgement feature entirely -- a defect that reads as "the rule is working" because nothing is sent.
+2. `Cache::add()` atomicity, read from vendor rather than assumed: `Repository::add()`
+   (Repository.php:462-492) delegates to the store's own `add()` **only if the store has one**
+   (Repository.php:478). `ArrayStore` -- what `phpunit.xml:25` sets `CACHE_STORE` to -- has no `add()`
+   method (its method list is get/put/increment/decrement/forever/forget/flush), so in tests `Cache::add`
+   runs the get-then-put fallback at Repository.php:488-490 and is **not atomic**. The production default is
+   `database` (`config/cache.php:18`, and `CACHE_STORE` is set in `.env`), and
+   `DatabaseStore::add()` (DatabaseStore.php:212-223) uses `insertOrIgnore(...) > 0` for anything that is
+   not SQL Server, which is atomic against the `cache.key` unique index.
+
+So: the atomicity claim in the deliverable is true in production and **unprovable by any test in this
+suite** -- it is stated with the vendor citations above, and no test may pretend to witness it. What the
+suite can witness is that a claimed key stands the callback down, which is why
+`test_a_claimed_cache_key_is_what_stands_the_callback_down` exists: it manufactures the only state in which
+`Cache::add` is the decider (key present, no earlier inbound row in the window), because `sync` dispatch
+cannot interleave two jobs. `test_two_messages_in_the_same_second_produce_one_ack` then witnesses the pair
+behaving as the deliverable promises, without claiming to prove which of the two guards stopped the second
+one -- in `sync` order it is the window query.
+
 - [ ] **Step 4: Run it**
 
 ```bash
 php artisan test tests/Feature/AckFlowTest.php
 ```
 
-Expected: 5 passed.
+Expected: 7 passed. If `test_first_inbound_of_the_day_gets_one_ack` fails with 0 outbound rows, check that
+the `where('id', '!=', $in->id)` exclusion survived the edit -- that is R46's failure mode, not a test bug.
 
 - [ ] **Step 5: Run the whole suite**
 
@@ -4253,7 +4329,12 @@ Expected: 5 passed.
 php artisan test
 ```
 
-Expected: all passed, no warnings.
+Expected: **131 passed** (the 124 that Task 7 closed on, plus this task's 7), no warnings. Report the
+assertion count you observe; it is what the next task's brief will quote. Then, per R42, mutate every guard
+this task adds -- the `$text === ''` return, the `$alreadyTalking` return, the `Cache::add` return, the
+`isOptedOut()` return, and the `where('id', '!=', $in->id)` exclusion -- and record which test fails for
+each with `landed=` proof. The exclusion is the one that will tempt a silent reimplementation: deleting it
+does not crash anything, it just stops every acknowledgement.
 
 - [ ] **Step 6: Commit**
 

@@ -3651,7 +3651,12 @@ class OptOutFlowTest extends TestCase
         ProcessInboundEvent::dispatchSync($this->inbound('hello again', 'wamid.S3'));
 
         $this->assertDatabaseMissing('wa_messages', ['meta_id' => 'wamid.CONF3']);
-        $this->assertSame(2, WaMessage::count(), 'inbound STOP + confirmation only');
+        // R40: suppression stops the acknowledgement, never the storage. Three rows exist -- the
+        // inbound STOP, its one confirmation, and this second inbound -- and only one of them ever
+        // left the building.
+        $this->assertSame(3, WaMessage::count(), 'STOP + confirmation + this inbound, stored and unsent');
+        $this->assertSame(1, WaMessage::where('direction', WaMessage::OUT)->count(),
+            'the second STOP-family inbound produced no send at all');
     }
 
     public function test_confirmation_is_recorded_even_when_meta_refuses_it()
@@ -3703,8 +3708,6 @@ class AutoResponder
 
         /** @var WaContact $contact */
         $contact = $in->contact;
-        $buttonId = $buttonId ?? ($in->raw['interactive']['button_reply']['id']
-            ?? $in->raw['button']['payload'] ?? null);
 
         if (OptOutKeywords::matches($in->body, $buttonId)) {
             $wasSilenced = $contact->isOptedOut();
@@ -3725,6 +3728,30 @@ class AutoResponder
 ```
 
 The acknowledgement rule is added in Task 8; the class is deliberately split so the opt-out half can be reviewed on its own.
+
+**R39 -- the responder does not re-derive `button_id`; the parser is its only reader.** An earlier
+draft of `handle()` ended with `$buttonId = $buttonId ?? ($in->raw['interactive']['button_reply']['id']
+?? $in->raw['button']['payload'] ?? null);`, a second source for a value the caller already supplies. It
+is redundant -- the job calls `handle($row, $item['button_id'])` and `WebhookParser` reads all three
+shapes (`interactive.button_reply.id`, `interactive.list_reply.id`, `button.payload`) with `path()` +
+`nullableStr()` (parser:98-100) -- and, worse, it is a *weaker* copy: it misses `list_reply`, so a
+list-reply STOP button that reached the responder with a null param would silently not fire. The first
+draft also looked like a crash risk -- indexing into a `raw` whose `interactive` might be a string. It
+is not: measured, the whole `??` chain returns `NULL` for string/int intermediates exactly as the
+parser's `path()` reader does, because `??` uses `isset()` semantics that suppress offset-on-scalar
+notices. So this is a single-source/YAGNI correction, not a safety fix, and it is stated as such:
+**external input is decided once, at the reader.** Re-reading `raw` here would put a second,
+divergent opinion about what a button id is into the system -- the same mistake R28 (digits compared in
+one place) and R34 (Meta's response read through one reader) were written to prevent. `handle()` takes
+the caller's `$buttonId` and does not look at `raw` at all.
+
+**R40 -- `test_no_acknowledgement_is_still_recorded` counts three rows, not two.** The third dispatch
+(`hello again`, `wamid.S3`) is an inbound message and `record()` always creates its row; suppression
+stops the *acknowledgement*, never the *storage* -- that is the entire recovery story in Step 4 ("the
+inbound message is still stored and still visible in the thread, so a human can read it and call them").
+The plan's `assertSame(2, ...)` contradicts its own design: with no ack there is no third *outbound*,
+but `S3` is a third *row*. The assertion counts what the test actually claims -- no send -- by the column
+that proves it, so a future ack regression cannot hide inside a total.
 
 - [ ] **Step 8: Wire the job to the responder.** In `app/Jobs/ProcessInboundEvent.php`, replace the line `// Task 7 adds the automatic-response call here.` with:
 

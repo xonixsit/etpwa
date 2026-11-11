@@ -20,7 +20,6 @@ class WhatsAppSender
             $phone,
             ['direction' => WaMessage::OUT, 'type' => 'text', 'body' => $text,
              'auto_reply' => $autoReply],
-            $autoReply,
         );
     }
 
@@ -49,7 +48,6 @@ class WhatsAppSender
             $phone,
             ['direction' => WaMessage::OUT, 'type' => 'template', 'template_name' => $name,
              'template_lang' => $lang, 'auto_reply' => $autoReply],
-            $autoReply,
         );
     }
 
@@ -64,7 +62,7 @@ class WhatsAppSender
         return mb_substr($s, 0, $max);
     }
 
-    private function post(array $payload, string $phone, array $attrs, bool $autoReply): WaMessage
+    private function post(array $payload, string $phone, array $attrs): WaMessage
     {
         // R35: the contact row and the payload have to agree. fromPhone() normalises internally, so
         // the first draft stored digits while sending the caller's punctuation -- Meta answers that
@@ -120,8 +118,8 @@ class WhatsAppSender
 
         if ($res->failed() || $wamid === '') {
             $code = self::str(data_get($json, 'error.code'), 12);
-            $title = self::str(data_get($json, 'error.error_data.details')
-                ?? data_get($json, 'error.message'), 255);
+            $title = self::str(data_get($json, 'error.error_data.details'), 255)
+                ?: self::str(data_get($json, 'error.message'), 255);
 
             return WaMessage::record($attrs + [
                 'wa_contact_id' => $contact->id, 'meta_id' => null,

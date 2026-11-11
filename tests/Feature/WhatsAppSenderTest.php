@@ -132,6 +132,41 @@ class WhatsAppSenderTest extends TestCase
         $this->assertSame('send rejected', $m->error_title);
     }
 
+    public function test_a_connection_failure_is_recorded_as_network_without_throwing()
+    {
+        // R38: the network is one of the four outcomes the deliverable names, and until now nothing
+        // reached the catch -- every fake answered, and the two config guards return before the
+        // request. A cURL error message is unbounded text that lands in error_title(255), so the same
+        // reader caps it here as it does Meta's own message.
+        Http::fake(['*' => fn () => throw new \Illuminate\Http\Client\ConnectionException(
+            str_repeat('x', 400))]);
+
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'x');
+
+        $this->assertSame(WaMessage::FAILED, $m->status);
+        $this->assertSame('network', $m->error_code);
+        $this->assertSame(255, mb_strlen($m->error_title));
+        $this->assertNull($m->meta_id);
+    }
+
+    public function test_error_details_that_are_shaped_wrong_fall_back_to_the_message()
+    {
+        // R34 again, one branch further down: ?? picks the first operand whenever it is not null, so
+        // an error_data.details that arrives as a list was kept, turned into '' by str(), and the
+        // readable error.message next to it was never tried. The row said "send rejected" when Meta
+        // had actually told us why.
+        Http::fake(['*' => Http::response(['error' => [
+            'message' => 'Limitation was applied due to poor quality rating',
+            'code' => 131056,
+            'error_data' => ['details' => ['unexpected', 'shape']],
+        ]], 400)]);
+
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'x');
+
+        $this->assertSame('131056', $m->error_code);
+        $this->assertSame('Limitation was applied due to poor quality rating', $m->error_title);
+    }
+
     public function test_error_text_from_graph_is_cut_to_the_column_it_lands_in()
     {
         // R34: error_title is varchar(255) and both Meta's message and cURL's message are unbounded.

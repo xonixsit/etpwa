@@ -75,6 +75,22 @@ class WaTablesTest extends TestCase
         $this->assertNotNull($m2->id);
     }
 
+    public function test_a_message_can_reach_the_contact_whose_row_holds_it()
+    {
+        // R37: belongsTo() guesses the key from the method name, so contact() asked for a column
+        // named contact_id that does not exist. Nothing read the relation until Task 11's thread
+        // view, which is exactly how a broken schema relation survives four tasks of green tests.
+        $c = WaContact::factory()->create(['phone' => '18479043315']);
+        $m = WaMessage::record([
+            'wa_contact_id' => $c->id, 'meta_id' => 'wamid.REL1',
+            'direction' => WaMessage::IN, 'type' => 'text', 'body' => 'hi', 'sent_at' => now(),
+        ]);
+
+        $this->assertTrue($m->contact->is($c));
+        $this->assertSame('18479043315', $m->fresh()->contact->phone);
+        $this->assertTrue($c->fresh()->messages->contains($m));
+    }
+
     public function test_event_row_stores_and_decrypts_changes()
     {
         $e = WaWebhookEvent::store('1427706937088002', 'E1', ['x' => 1], WaWebhookEvent::STORED);

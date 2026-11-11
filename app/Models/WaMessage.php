@@ -40,7 +40,7 @@ class WaMessage extends Model
 
     public function contact(): BelongsTo
     {
-        return $this->belongsTo(WaContact::class);
+        return $this->belongsTo(WaContact::class, 'wa_contact_id');
     }
 
     public static function record(array $attrs): self

@@ -15,6 +15,8 @@ return Application::configure(basePath: dirname(__DIR__))
             'wa/webhook',
             'inbound/record-send',
         ]);
+        $middleware->redirectGuestsTo(fn () => '/login');
+        $middleware->redirectUsersTo('/inbox');
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //

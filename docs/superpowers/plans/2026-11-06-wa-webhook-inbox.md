@@ -3164,6 +3164,41 @@ class WhatsAppSenderTest extends TestCase
         $this->assertSame('send rejected', $m->error_title);
     }
 
+    public function test_a_connection_failure_is_recorded_as_network_without_throwing()
+    {
+        // R38: the network is one of the four outcomes the deliverable names, and until now nothing
+        // reached the catch -- every fake answered, and the two config guards return before the
+        // request. A cURL error message is unbounded text that lands in error_title(255), so the same
+        // reader caps it here as it does Meta's own message.
+        Http::fake(['*' => fn () => throw new \Illuminate\Http\Client\ConnectionException(
+            str_repeat('x', 400))]);
+
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'x');
+
+        $this->assertSame(WaMessage::FAILED, $m->status);
+        $this->assertSame('network', $m->error_code);
+        $this->assertSame(255, mb_strlen($m->error_title));
+        $this->assertNull($m->meta_id);
+    }
+
+    public function test_error_details_that_are_shaped_wrong_fall_back_to_the_message()
+    {
+        // R34 again, one branch further down: ?? picks the first operand whenever it is not null, so
+        // an error_data.details that arrives as a list was kept, turned into '' by str(), and the
+        // readable error.message next to it was never tried. The row said "send rejected" when Meta
+        // had actually told us why.
+        Http::fake(['*' => Http::response(['error' => [
+            'message' => 'Limitation was applied due to poor quality rating',
+            'code' => 131056,
+            'error_data' => ['details' => ['unexpected', 'shape']],
+        ]], 400)]);
+
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'x');
+
+        $this->assertSame('131056', $m->error_code);
+        $this->assertSame('Limitation was applied due to poor quality rating', $m->error_title);
+    }
+
     public function test_error_text_from_graph_is_cut_to_the_column_it_lands_in()
     {
         // R34: error_title is varchar(255) and both Meta's message and cURL's message are unbounded.
@@ -3209,7 +3244,6 @@ class WhatsAppSender
             $phone,
             ['direction' => WaMessage::OUT, 'type' => 'text', 'body' => $text,
              'auto_reply' => $autoReply],
-            $autoReply,
         );
     }
 
@@ -3238,7 +3272,6 @@ class WhatsAppSender
             $phone,
             ['direction' => WaMessage::OUT, 'type' => 'template', 'template_name' => $name,
              'template_lang' => $lang, 'auto_reply' => $autoReply],
-            $autoReply,
         );
     }
 
@@ -3253,7 +3286,7 @@ class WhatsAppSender
         return mb_substr($s, 0, $max);
     }
 
-    private function post(array $payload, string $phone, array $attrs, bool $autoReply): WaMessage
+    private function post(array $payload, string $phone, array $attrs): WaMessage
     {
         // R35: the contact row and the payload have to agree. fromPhone() normalises internally, so
         // the first draft stored digits while sending the caller's punctuation -- Meta answers that
@@ -3309,8 +3342,8 @@ class WhatsAppSender
 
         if ($res->failed() || $wamid === '') {
             $code = self::str(data_get($json, 'error.code'), 12);
-            $title = self::str(data_get($json, 'error.error_data.details')
-                ?? data_get($json, 'error.message'), 255);
+            $title = self::str(data_get($json, 'error.error_data.details'), 255)
+                ?: self::str(data_get($json, 'error.message'), 255);
 
             return WaMessage::record($attrs + [
                 'wa_contact_id' => $contact->id, 'meta_id' => null,
@@ -3344,16 +3377,49 @@ that true.
 literal are exactly what drifts. Doing it now would have rewritten Task 4's shipped blocks, which is
 the wrong trade inside a task whose deliverable is the send path.
 
+**R38 -- an outcome the deliverable names has to be reached by a test, not only by code.** The task
+states four outcomes: accepted, Meta-rejected, network-thrown, config-refused. Nine tests covered
+three of them; nothing in the file ever reached the `catch`, because every fake answered and both
+config guards return before the request is built. So the fourth outcome was a branch with a name and
+no witness: narrowing `catch (\Throwable $e)` to `catch (\InvalidArgumentException $e)` -- which lets
+`ConnectionException` escape and breaks the "never throws at its caller" deliverable outright -- left
+the suite green, and so did dropping the `str()` cap on `$e->getMessage()`. `test_a_connection_failure_is_recorded_as_network_without_throwing`
+is the witness; a throwing stub (`Http::fake(['*' => fn () => throw new ConnectionException(...)])`)
+is how the fake layer reaches the transport-failure shape without touching the network. The same pass
+found a real defect one line away (the reviewer called it M-b): `data_get($j,'error.error_data.details')
+?? data_get($j,'error.message')` reads as "prefer details, fall back to the message", but `??` only
+skips null, so a `details` that arrives as a *list* is kept, becomes `''` in `str()`, and the readable
+`error.message` sitting next to it is never tried -- the row said `send rejected` when Meta had told
+us why. `?:` between two `str()` calls is the reading that matches the intent, and
+`test_error_details_that_are_shaped_wrong_fall_back_to_the_message` pins it (measured: fails against
+the `??` form, passes against `?:`).
+
+**Two findings this task did not take, and where they actually live.** The review also flagged that
+`(string) $v` in `sendTemplate()` throws if a variable is an array, and that `template_lang` reaches a
+varchar(10) uncapped. Both are true of the *class* in isolation and false of the *system*: every caller
+the plan defines builds `$variables` from `explode(',', (string) $data['variables'])` -- strings by
+construction -- and validates `'language' => 'max:10'`, which is the column width (Task 12, and Task 10's
+`recordSend` does the same). Adding a second coercion inside the sender would be validating an internal
+call boundary twice, and R34 is about *external* input, which this is not. The genuinely uncapped path
+is Task 13's CSV import, which reads `$row['language']` and `$row['template']` straight from a file into
+those columns with no validation in front of it; that is external input and it is fixed there, not by
+duplicating a guard here.
+
+**Cleanup that was not optional (M-a).** `post()`'s fourth parameter `bool $autoReply` was dead -- it
+was already inside `$attrs`, and the body never read the parameter. A private signature that lies about
+what it needs is exactly what Tasks 7-13 will mis-call, so the parameter is gone from the signature and
+both call sites. No behaviour change; the eleven tests and the 73-pass suite are the check.
+
 - [ ] **Step 4: Run the test**
 
 ```bash
 php artisan test tests/Feature/WhatsAppSenderTest.php
 ```
 
-Expected: **9 passed** (the five that describe the happy and 400 paths, plus the four R34/R35 tests).
-Full suite after this task: **71 passed** (62 after Task 5's rounds, which include R37's relation test,
-plus these 9). Then mutate each new guard once, restoring and re-running after each, and report any
-mutation that leaves the suite green:
+Expected: **11 passed** (the five that describe the happy and 400 paths, the four R34/R35 tests, and
+the two R38 tests). Full suite after this task: **73 passed** (62 after Task 5's rounds, which include
+R37's relation test, plus these 11). Then mutate each new guard once, restoring and re-running after
+each, and report any mutation that leaves the suite green:
 
 - the two `error_title` reads through `str()` back to a bare value, and the `str()` calls losing their
   widths -> `test_error_text_from_graph_is_cut_to_the_column_it_lands_in` fails.
@@ -3365,19 +3431,27 @@ mutation that leaves the suite green:
 - `data_get($json, 'messages.0.id')` back to `$json['messages'][0]['id'] ?? null`, with the `=== ''`
   comparison back to `=== null` -> `test_a_graph_body_that_is_shaped_wrong_is_recorded_not_thrown`
   fails, and it fails with an exception rather than an assertion -- which is the whole point of R34.
+- `catch (\Throwable $e)` narrowed to `catch (\InvalidArgumentException $e)`, so a `ConnectionException`
+  escapes -> `test_a_connection_failure_is_recorded_as_network_without_throwing` fails (R38).
+- `self::str($e->getMessage(), 255)` back to a bare cast -> the same test fails on the length.
+- `?:` back to `??` between the two `str()` calls ->
+  `test_error_details_that_are_shaped_wrong_fall_back_to_the_message` fails (R38).
+- `$code === '' ? (string) $res->status() : $code` back to `$code` -> `test_a_graph_body_that_is_shaped_wrong_is_recorded_not_thrown`
+  fails, because a body with no `error.code` would then store an empty code.
 
-**Measured, and one correction to the record (Task 6 Step 4).** All five bit: M1 caps lost -> 2 failed
-(`shaped-wrong`, because an uncapped `$title` is null for a body with no `error` key, and
+**Measured, and one correction to the record (Task 6 Step 4).** All nine bit. Round 1: M1 caps lost -> 2
+failed (`shaped-wrong`, because an uncapped `$title` is null for a body with no `error` key, and
 `cut-to-column`); M2 numeric branch -> 2 failed (the 400 test and `cut-to-column`); M3 payload `to` ->
 1 failed (`punctuated-phone`); M4 `phone_id` guard -> 1 failed (`unconfigured-phone-id`); M5 unguarded
-read -> 1 failed (`shaped-wrong`). So the first three bullets under-report: each of those guards is
-pinned by more than the test named above. The pass also has to disclose its own tooling: the driver
-that produced the *first* Task 6 numbers destructured its mutation table with
-`const [, name, ...pairs]` instead of `const [name, ...pairs]`, which silently dropped every
-mutation's first substitution pair -- so three single-pair mutations were never applied, the file was
-byte-identical to the original, and I wrote those runs up as three dead mutations and almost
-"strengthened" tests that already worked. Fixed driver, `landed=` flag printed per run, and
-`restored_identical true` after every restore. The lesson is the R36 lesson again: an absence of
+read -> 1 failed (`shaped-wrong`). Round 2, after the review: N1 narrowed catch -> 1 failed; N2 uncapped
+network message -> 1 failed; N3 `??` restored -> 1 failed; N4 no status fallback -> 1 failed. So the
+bullets above under-report: each of those guards is pinned by more than the test named next to it. The
+pass also has to disclose its own tooling: the driver that produced the *first* Task 6 numbers
+destructured its mutation table with `const [, name, ...pairs]` instead of `const [name, ...pairs]`,
+which silently dropped every mutation's first substitution pair -- so three single-pair mutations were
+never applied, the file was byte-identical to the original, and I wrote those runs up as three dead
+mutations and almost "strengthened" tests that already worked. Fixed driver, `landed=` flag printed per
+run, and `restored_identical true` after every restore. The lesson is the R36 lesson again: an absence of
 evidence produced by your own harness is not evidence of absence, and a mutation result is only
 trustworthy if the harness proves the edit landed.
 

@@ -36,6 +36,14 @@ class AckFlowTest extends TestCase
         Http::preventStrayRequests();
     }
 
+    protected function tearDown(): void
+    {
+        // Carbon's test-now is a process-wide static; the re-arm test freezes it and nothing else here
+        // would ever see the real clock again.
+        Carbon::setTestNow();
+        parent::tearDown();
+    }
+
     private function inbound(string $body, string $phone = '18479043315', ?CarbonInterface $at = null): array
     {
         // R46: the third parameter exists because two of the tests below have to put two messages in the
@@ -118,10 +126,12 @@ class AckFlowTest extends TestCase
      *
      * Spec §9 promises "never auto-send to a contact where opted_out_at is set, from any code path", and
      * this seam is the only line that keeps that promise for a contact silenced by an admin (Task 12) or an
-     * import (Task 13) rather than by their own STOP. Every other test in this file reaches the seam with
-     * the window query already answering "no" first, so all of them stay green with the seam deleted --
-     * measured: neutering it left all 165 rows passing. This is the one state where it is the decider:
-     * suppressed contact, a message that is not a keyword, and no inbound inside the 24-hour window.
+     * import (Task 13) rather than by their own STOP. Deleting the seam left all 165 rows green, because no
+     * other row in this file is a suppressed contact that reaches it -- the STOP message returns inside the
+     * keyword branch (`AutoResponder.php:33`) and never gets here, and the one `OptOutFlowTest` row that
+     * sends a non-keyword message to a silenced contact would be stood down by the window query (`:56`) even
+     * without the seam, because its own STOP is an inbound inside the window. This is the state where the
+     * seam alone decides: suppressed contact, a message that is not a keyword, no inbound in the window.
      */
     public function test_a_non_keyword_inbound_from_a_silenced_contact_gets_no_ack()
     {
@@ -154,6 +164,71 @@ class AckFlowTest extends TestCase
 
         $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
         $this->assertSame(2, WaMessage::where('direction', WaMessage::IN)->count());
+    }
+
+    /**
+     * R49 witness for the length of the window -- the two 24-hour numbers, the query's lower bound
+     * (`AutoResponder.php:59`) and the cache key's TTL (`:67`). Widening *either* to 30 days left the whole
+     * suite green as this file stood, i.e. nothing pinned "per day" rather than "per month". Freezing the
+     * clock is the only way to reach the state where they decide: the key must expire (ArrayStore computes
+     * expiry from Carbon::now(), which honours the freeze) and the earlier message must fall outside the
+     * window.
+     */
+    public function test_the_contact_is_acknowledged_again_once_the_window_has_passed()
+    {
+        Http::fake(['*' => Http::sequence()
+            ->push(['messages' => [['id' => 'wamid.ACK1']]], 200)
+            ->push(['messages' => [['id' => 'wamid.ACK2']]], 200)]);
+        ProcessInboundEvent::dispatchSync($this->inbound('hello'));
+
+        Carbon::setTestNow(now()->addHours(25));
+        ProcessInboundEvent::dispatchSync($this->inbound('a day later'));
+
+        $this->assertSame(2, WaMessage::where('direction', WaMessage::OUT)->count());
+        $this->assertDatabaseHas('wa_messages', ['meta_id' => 'wamid.ACK2']);
+    }
+
+    /**
+     * R49 witness for `->where('direction', WaMessage::IN)` in the window query. Deleting the filter left
+     * the suite green, and the state it permits is the ordinary one: staff reply in the afternoon, the
+     * contact's first message next morning -- and no acknowledgement, because an outbound row of our own
+     * counted as "this contact is already talking".
+     */
+    public function test_a_staff_reply_inside_the_window_does_not_stand_the_ack_down()
+    {
+        $contact = WaContact::factory()->create(['phone' => '18479043315']);
+        WaMessage::record([
+            'wa_contact_id' => $contact->id, 'meta_id' => 'wamid.STAFF1', 'direction' => WaMessage::OUT,
+            'type' => 'text', 'body' => 'here is your filing quote', 'status' => WaMessage::SENT,
+            'sent_at' => now()->subHours(2), 'raw' => ['text' => ['body' => 'here is your filing quote']],
+        ]);
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.ACK1']]], 200)]);
+        ProcessInboundEvent::dispatchSync($this->inbound('hello'));
+
+        $this->assertSame(2, WaMessage::where('direction', WaMessage::OUT)->count());
+        $this->assertDatabaseHas('wa_messages', ['meta_id' => 'wamid.ACK1', 'auto_reply' => true]);
+    }
+
+    /**
+     * R49 witness for the window's upper bound (`sent_at < $at + 1s`). Meta redelivers a webhook it already
+     * delivered, so an older message can be processed after a newer one; the bound says only rows at or
+     * before the message being handled may stand it down. Without it (measured: suite green) the decision
+     * reads rows that have not happened yet. The cache key normally hides the difference, so the state is
+     * manufactured the way the import path does it: a stored row with no key behind it.
+     */
+    public function test_a_row_recorded_after_this_message_does_not_stand_the_ack_down()
+    {
+        $contact = WaContact::factory()->create(['phone' => '18479043315']);
+        WaMessage::record([
+            'wa_contact_id' => $contact->id, 'meta_id' => 'wamid.LATER1', 'direction' => WaMessage::IN,
+            'type' => 'text', 'body' => 'a newer message, stored first', 'status' => WaMessage::INCOMING,
+            'sent_at' => now()->addMinutes(5), 'raw' => ['text' => ['body' => 'a newer message, stored first']],
+        ]);
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.ACK1']]], 200)]);
+        ProcessInboundEvent::dispatchSync($this->inbound('hello'));
+
+        $this->assertSame(1, WaMessage::where('direction', WaMessage::OUT)->count());
+        $this->assertDatabaseHas('wa_messages', ['meta_id' => 'wamid.ACK1']);
     }
 
     public function test_two_messages_in_the_same_second_produce_one_ack()

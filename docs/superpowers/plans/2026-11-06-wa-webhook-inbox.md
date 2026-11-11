@@ -4850,6 +4850,199 @@ class AuthTest extends TestCase
             ->assertExitCode(1);
         $this->assertSame(0, User::where('email', 'a@b.co')->count());
     }
+
+    public function test_an_authenticated_staff_member_is_bounced_off_the_login_form()
+    {
+        $this->actingAs(User::factory()->create());
+
+        $this->get('/login')->assertRedirect('/inbox');
+    }
+
+    public function test_the_sixth_login_attempt_is_refused_by_the_throttle()
+    {
+        User::factory()->create(['email' => 'staff@etaxplanner.com',
+                                 'password' => Hash::make('good-pass-123')]);
+
+        for ($attempt = 1; $attempt <= 5; $attempt++) {
+            $this->from('/login')->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'nope'])
+                ->assertRedirect('/login');
+        }
+
+        $this->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'good-pass-123'])
+            ->assertStatus(429);
+        $this->assertGuest();
+    }
+
+    public function test_the_login_form_renders_a_csrf_token()
+    {
+        $html = $this->get('/login')->getContent();
+
+        $this->assertStringContainsString('name="_token" value="' . session()->token() . '"', $html);
+    }
+
+    public function test_the_login_endpoint_rejects_a_request_with_no_token()
+    {
+        // Flip the bound env so Application::runningUnitTests() is false and VerifyCsrfToken runs at all.
+        $this->app->instance('env', 'production');
+
+        User::factory()->create(['email' => 'staff@etaxplanner.com',
+                                 'password' => Hash::make('good-pass-123')]);
+
+        $html = $this->get('/login')->getContent();
+        preg_match('/name="_token" value="([^"]+)"/', $html, $match);
+        $token = $match[1] ?? '';
+
+        $this->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'good-pass-123'])
+            ->assertStatus(419);
+
+        $this->post('/login', ['_token' => $token, 'email' => 'staff@etaxplanner.com', 'password' => 'good-pass-123'])
+            ->assertStatus(302);
+    }
+
+    public function test_the_login_form_renders_the_three_inputs_it_promises()
+    {
+        $this->get('/login')
+            ->assertSee('name="email"', false)
+            ->assertSee('name="password"', false)
+            ->assertSee('name="remember"', false);
+    }
+
+    public function test_a_failed_sign_in_displays_the_credentials_message()
+    {
+        User::factory()->create(['email' => 'staff@etaxplanner.com',
+                                 'password' => Hash::make('good-pass-123')]);
+
+        $this->from('/login')->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'nope']);
+
+        $html = $this->get('/login')->getContent();
+
+        $this->assertStringContainsString('Those credentials do not match our records.', $html);
+    }
+
+    public function test_stay_signed_in_sets_a_recall_token()
+    {
+        $user = User::factory()->create(['email' => 'staff@etaxplanner.com',
+                                         'password' => Hash::make('good-pass-123'),
+                                         'remember_token' => null]);
+
+        $this->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'good-pass-123', 'remember' => '1'])
+            ->assertRedirect('/inbox');
+
+        $this->assertNotNull($user->fresh()->remember_token);
+    }
+
+    public function test_no_recall_token_is_set_when_stay_signed_in_is_left_unchecked()
+    {
+        $user = User::factory()->create(['email' => 'staff@etaxplanner.com',
+                                         'password' => Hash::make('good-pass-123'),
+                                         'remember_token' => null]);
+
+        $this->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'good-pass-123'])
+            ->assertRedirect('/inbox');
+
+        $this->assertNull($user->fresh()->remember_token);
+    }
+
+    public function test_the_validate_block_runs_and_the_email_rule_is_the_email_rule()
+    {
+        \Illuminate\Support\Facades\DB::enableQueryLog();
+
+        \Illuminate\Support\Facades\DB::flushQueryLog();
+        $this->post('/login', ['email' => 'not-an-email', 'password' => 'anything']);
+        $this->assertSame(0, count(\Illuminate\Support\Facades\DB::getQueryLog()));
+
+        \Illuminate\Support\Facades\DB::flushQueryLog();
+        $this->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'wrong-but-shaped']);
+        $this->assertGreaterThan(0, count(\Illuminate\Support\Facades\DB::getQueryLog()));
+    }
+
+    public function test_a_missing_password_is_a_redirect_not_a_crash()
+    {
+        User::factory()->create(['email' => 'staff@etaxplanner.com',
+                                 'password' => Hash::make('good-pass-123')]);
+
+        $this->post('/login', ['email' => 'staff@etaxplanner.com'])
+            ->assertStatus(302);
+        $this->assertGuest();
+    }
+
+    public function test_a_nested_array_password_is_a_302_not_a_500()
+    {
+        User::factory()->create(['email' => 'staff@etaxplanner.com',
+                                 'password' => Hash::make('good-pass-123')]);
+
+        $this->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => ['nested']])
+            ->assertStatus(302);
+        $this->assertGuest();
+    }
+
+    public function test_logout_destroys_the_sessions_stored_data()
+    {
+        $this->actingAs(User::factory()->create());
+        session()->put('probe-key', 'alive');
+
+        $this->post('/logout')->assertRedirect('/login');
+
+        $this->assertNull(session()->get('probe-key'));
+    }
+
+    public function test_a_password_of_exactly_ten_characters_is_accepted()
+    {
+        $this->artisan('wa:create-user', ['email' => 'a@b.co', '--password' => '0123456789'])
+            ->assertSuccessful();
+
+        $this->assertSame(1, User::where('email', 'a@b.co')->count());
+        $this->assertTrue(Hash::check('0123456789', User::where('email', 'a@b.co')->value('password')));
+    }
+
+    public function test_a_password_of_nine_characters_is_refused()
+    {
+        $this->artisan('wa:create-user', ['email' => 'a@b.co', '--password' => '123456789'])
+            ->assertExitCode(1);
+
+        $this->assertSame(0, User::where('email', 'a@b.co')->count());
+    }
+
+    public function test_the_email_argument_is_trimmed()
+    {
+        $this->artisan('wa:create-user', ['email' => '  a@b.co  ', '--password' => 'first-pass-1'])
+            ->assertSuccessful();
+
+        $this->assertSame(1, User::where('email', 'a@b.co')->count());
+        $this->assertSame(0, User::where('email', '  a@b.co  ')->count());
+    }
+
+    public function test_an_empty_email_is_refused_without_touching_the_db()
+    {
+        $this->artisan('wa:create-user', ['email' => '', '--password' => 'first-pass-1'])
+            ->assertExitCode(1);
+
+        $this->assertSame(0, User::count());
+    }
+
+    public function test_the_default_staff_display_name_is_the_one_we_ship()
+    {
+        $this->artisan('wa:create-user', ['email' => 'a@b.co', '--password' => 'first-pass-1'])
+            ->assertSuccessful();
+
+        $this->assertSame('E Tax Planner staff', User::where('email', 'a@b.co')->value('name'));
+    }
+
+    public function test_the_two_route_names_the_deliverable_promises_exist()
+    {
+        $this->assertTrue(\Illuminate\Support\Facades\Route::has('login'));
+        $this->assertTrue(\Illuminate\Support\Facades\Route::has('logout'));
+    }
+
+    public function test_the_throttle_is_on_the_post_only()
+    {
+        $response = null;
+        for ($attempt = 1; $attempt <= 6; $attempt++) {
+            $response = $this->get('/login');
+        }
+
+        $this->assertNotSame(429, $response->getStatusCode());
+    }
 }
 ```
 
@@ -5033,8 +5226,8 @@ Route::post('/wa/webhook', [WaWebhookController::class, 'ingest'])
     ->withoutMiddleware('web')
     ->name('wa.webhook.ingest');
 
-Route::get('/login', [LoginController::class, 'show'])->name('login');
-Route::post('/login', [LoginController::class, 'store']);
+Route::get('/login', [LoginController::class, 'show'])->middleware('guest')->name('login');
+Route::post('/login', [LoginController::class, 'store'])->middleware('throttle:5,1');
 Route::post('/logout', [LoginController::class, 'destroy'])->name('logout');
 
 Route::middleware('auth')->group(function () {
@@ -5057,7 +5250,8 @@ Then in `bootstrap/app.php`, inside the existing `withMiddleware` closure, after
 php artisan test tests/Feature/AuthTest.php
 ```
 
-Expected: 7 passed.
+Expected: 26 passed (76 assertions). The plan's 7 rows are all still here; the other 19 come from R50 and the
+three deviations recorded at the end of this task.
 
 - [ ] **Step 9: Create the real staff account locally** (password is typed at the prompt, never in chat or in a file):
 
@@ -5068,9 +5262,152 @@ php artisan wa:create-user staff@etaxplanner.com
 - [ ] **Step 10: Commit**
 
 ```bash
+git rm tests/Feature/ExampleTest.php resources/views/welcome.blade.php
 git add app resources routes/web.php bootstrap/app.php tests/Feature/AuthTest.php
 git commit -m "feat: staff login, logout and one seeded account"
 ```
+
+---
+
+**R50 -- the plan's Step 7 shipped a line that tested nothing and dropped a spec line it promised; the review then found 24 unguarded arms.**
+
+Three deviations from the plan were authorised in the brief before any code was written, and one of them
+turned out to require a code change the brief said would not be needed.
+
+**1. `tests/Feature/ExampleTest.php` and `resources/views/welcome.blade.php` are deleted, not rewritten.**
+Step 7 replaces `routes/web.php`, and the new `/` is behind `auth` and redirects, so the scaffolding row --
+`$this->get('/')` then `assertStatus(200)` at `ExampleTest.php:15,17` -- returns a 302 the moment Step 7 lands.
+Measured on the way: with Steps 3-7 applied and the deletions not yet made, the suite was
+**1 failed, 176 passed (395 assertions)**, the failure being exactly that row. It is a duplicate of
+`test_a_guest_cannot_reach_the_staff_area` and `test_correct_credentials_open_a_session_and_send_staff_to_the_inbox`,
+so it is gone rather than re-pointed; `tests/Unit/ExampleTest.php` (which asserts nothing about `/`) stays.
+Note for whoever greps next: the pre-deletion reference is only `routes/web.php:7`, and a search for the bare
+word `welcome` misleads -- `tests/Feature/WhatsAppSenderTest.php:90` uses the template name `etp_welcome_c`.
+
+**2. `bootstrap/app.php`'s `redirectUsersTo('/inbox')` was inert, and the fix is one line of middleware.**
+The brief said this deviation would "add tests and change no code". That is false, and the measurement is in
+vendor: `Middleware::redirectUsersTo()` (`Foundation/Configuration/Middleware.php:550-553`) does exactly one
+thing -- `RedirectIfAuthenticated::redirectUsing($users)` -- and its own docblock at `:545` reads "where users
+are redirected **by the guest middleware**". The Step 7 fence declares `GET /login` with no `guest`
+middleware, and nothing else in the app uses it, so `RedirectIfAuthenticated` never ran and an authenticated
+visitor to `/login` got **200 plus a second login form**. `routes/web.php:14` now carries
+`->middleware('guest')` (alias at `Middleware.php:787`, so no registration was needed). Ratified after an
+independent review measured the smaller option -- deleting `redirectUsersTo`, the middleware and the row
+together yields a clean **177 passed (406 assertions)** -- and rejected, because that state silently removes
+a plan instruction instead of completing one, and leaves signed-in staff staring at a credentials form on a
+public subdomain. Two things go with the ratification: the witness row
+`test_an_authenticated_staff_member_is_bounced_off_the_login_form` is the only thing that notices either half
+(`bootstrap/app.php:19` deleted, or `guest` deleted, each fails that row and nothing else), and between Task 9
+and Task 11 a signed-in visitor to `/login` is bounced to a **404**, because `/inbox` does not exist yet. That
+is a deploy-note wart, not a defect, and it disappears at Task 11.
+
+**3. `POST /login` is throttled, because spec section 6 line 128 promises it and the plan never implemented it.**
+`routes/web.php:15` carries `->middleware('throttle:5,1')` on the POST only -- the GET stays unthrottled so a
+signed-in staff member can navigate back without a 429. The row
+`test_the_sixth_login_attempt_is_refused_by_the_throttle` sends five wrong passwords (each needing
+`from('/login')`, without which the redirect-back goes to the `APP_URL` root rather than `/login`) and then the
+*correct* password, asserting 429 and `assertGuest()`. Both halves of the middleware are witnessed: widening to
+`throttle:1000,1` and deleting it outright each fail exactly that row. **Not verified, and it is a real gap:**
+`CACHE_STORE=array` means the limiter's bucket is per-test-process and keyed to one IP; behaviour under a
+production cache store, with real client IPs and decay, is unchecked. Task 16 gains the item.
+
+Then the review. It did not re-run these arms as its main work -- it invented 31 new ones and **24 of them left
+all 178 green**, which is the same hole R48 and R49 found in Task 8, in a task that looked thoroughly tested.
+V25 was never run, so the numbering below skips it. "control" means the arm was already caught by a row the
+plan itself wrote; "green 178" means nothing in the suite noticed until R50.
+
+| arm | mutation (one exact-string replace, `occurrences=1`) | suite as Step 10 shipped it | witness after R50 |
+| --- | --- | --- | --- |
+| V1 | `layout.blade.php` header logout form loses its `@csrf` | green 178 | not witnessable in this task -- the form is inside `@auth` and Task 9 ships no authed page; **Task 11 must assert `_token` in the rendered logout form** |
+| V2 | login form loses its `@csrf` | green 178 | `test_the_login_form_renders_a_csrf_token` + `test_the_login_endpoint_rejects_a_request_with_no_token` |
+| V3 | the `remember` checkbox deleted | green 178 | `test_the_login_form_renders_the_three_inputs_it_promises` |
+| V4 | `<h2>E Tax Planner inbox</h2>` deleted | green 178 | none -- heading copy with no behaviour behind it; recorded as accepted |
+| V5 | the `@error('email')` render block deleted | green 178 | `test_a_failed_sign_in_displays_the_credentials_message` |
+| V6 | the whole `name="email"` input deleted | green 178 | `test_the_login_form_renders_the_three_inputs_it_promises` |
+| V7 | `<meta name="csrf-token">` deleted | green 178 | not witnessable in this task -- its consumer is Task 13's JavaScript; **Task 13 must witness the tag being read** |
+| V8 | `Auth::attempt($credentials, $request->boolean('remember'))` -> `Auth::attempt($credentials)` | green 178 | `test_stay_signed_in_sets_a_recall_token` |
+| V34 | ... -> `Auth::attempt($credentials, true)` (found by the fix round, not the review) | green 195 | `test_no_recall_token_is_set_when_stay_signed_in_is_left_unchecked` |
+| V9 | the `validate([...])` block -> `$credentials = $request->all();` | green 178 | `test_the_validate_block_runs_and_the_email_rule_is_the_email_rule` + the two request-shape rows |
+| V10 | `'email' => ['required','email']` -> `['required']` | green 178 | `test_the_validate_block_runs_and_the_email_rule_is_the_email_rule` |
+| V11 | the credentials message -> `'Nope.'` | green 178 | `test_a_failed_sign_in_displays_the_credentials_message` |
+| V12 | `redirect('/inbox')` -> `redirect()->intended('/inbox')` | green 178 | none -- recorded below as a deliberate choice |
+| V13 | `destroy()` loses `session()->invalidate()` | green 178 | `test_logout_destroys_the_sessions_stored_data` |
+| V14 | `destroy()` loses `session()->regenerateToken()` | green 178 | no row possible -- written report below |
+| V15 | `destroy()` loses `Auth::logout()` | 1 failed (control) | `test_logout_ends_the_session` |
+| V16 | `store()` loses `session()->regenerate()` | green 178 | no row possible -- written report below |
+| V17 | `strlen($password) < 10` -> `< 11` | green 178 | `test_a_password_of_exactly_ten_characters_is_accepted` |
+| V18 | `strlen($password) < 10` -> `< 9` | green 178 | `test_a_password_of_nine_characters_is_refused` |
+| V19 | `Hash::make($password)` -> `$password` | green 178 | none -- the `hashed` cast does the work; written report below |
+| V20 | `trim((string) $this->argument('email'))` loses its `trim` | green 178 | `test_the_email_argument_is_trimmed` |
+| V21 | the `$email === ''` guard deleted | green 178 | `test_an_empty_email_is_refused_without_touching_the_db` |
+| V22 | the default-name line deleted | 1 failed (`users.name` NOT NULL) | pre-existing idempotency row + `test_the_default_staff_display_name_is_the_one_we_ship` |
+| V23 | `throttle:5,1` added to **GET** `/login` | green 178 | `test_the_throttle_is_on_the_post_only` |
+| V24 | `->name('login')` dropped | green 178 | `test_the_two_route_names_the_deliverable_promises_exist` |
+| V26 | `->name('logout')` dropped | green 178 | the same row |
+| V27 | `auth` *moved* off `/` onto POST `/logout` | 1 failed (control) | `test_a_guest_cannot_reach_the_staff_area` |
+| V28 | `->middleware('guest')` dropped | 1 failed (control) | `test_an_authenticated_staff_member_is_bounced_off_the_login_form` |
+| V29 | `->middleware('throttle:5,1')` deleted outright | 1 failed (control) | `test_the_sixth_login_attempt_is_refused_by_the_throttle` |
+| V30 | `redirectUsersTo('/inbox')` -> `redirectUsersTo('/')` | 1 failed (control) | the same bounce row |
+| V31 | `redirectGuestsTo(fn () => '/login')` -> `redirectGuestsTo('/')` | 1 failed (control) | `test_a_guest_cannot_reach_the_staff_area` |
+| V32 | `'login'` added to `validateCsrfTokens(except:)` | green 178 | `test_the_login_endpoint_rejects_a_request_with_no_token` |
+| V33 | *three files at once*: `redirectUsersTo`, the `guest` middleware and the bounce row all deleted | n/a -- the alternative design | measured **177 passed (406 assertions)**, a coherent state, rejected in deviation 2 |
+
+One of these is worth reading twice because it is not the implementer's oversight but the plan's:
+`test_login_page_renders_a_form` asserts `assertSee('E Tax Planner inbox')`, and that string is in
+`layout.blade.php:7`'s `<title>` -- so it is satisfied by the layout on any page, and deleting the login form's
+entire `name="email"` input leaves the row green. The same class of problem the implementer caught in its own
+F-1, one row over. The fenced row is left exactly as the plan wrote it; the real assertions are the ones added
+here.
+
+Recorded, deliberately **not** changed, and not written up as tests because a test would pass for the wrong reason:
+
+- **`$request->session()->regenerate()` in `store()` is redundant.** Deleting it leaves the suite green, and the
+  implementer's explanation (`SESSION_DRIVER=array`, so nothing can observe the id) is the wrong cause: with the
+  line deleted the session id *does* rotate, because `SessionGuard::updateSession()`
+  (`vendor/.../Auth/SessionGuard.php:600-605`) calls `session->regenerate(true)` inside `Auth::attempt()`, before
+  `LoginController.php:30` runs. A rotation row would therefore be green either way. The line stays as
+  defence-in-depth for a future login path that does not use `attempt()`; note the cost -- on a server-side
+  driver a successful login now does two destroy-and-write cycles.
+- **`$request->session()->regenerateToken()` in `destroy()`** is redundant for the same shape of reason:
+  `invalidate()` is `flush()` + `migrate(true)` (`Store.php:605-610`), so `_token` is already gone and
+  `Store::token()` recreates it lazily. `invalidate()` itself is now witnessed; `Auth::logout()` was already.
+- **`Hash::make()` in `wa:create-user` is not what hashes the password** -- the `'password' => 'hashed'` cast does
+  (`app/Models/User.php:46`, `HasAttributes.php:1477`). Harmless duplication; the cast is why the factory and the
+  command can both be trusted.
+- **Login ignores the intended URL.** `redirect('/inbox')` rather than `redirect()->intended('/inbox')`: with one
+  staff page there is nothing to intend. If Task 11 makes `/inbox/{contact}` a deep link worth returning to, this
+  is the line to revisit.
+- **`redirectGuestsTo(fn () => '/login')` and `->name('login')` are individually redundant and jointly
+  load-bearing.** With the callback absent, `Foundation/Exceptions/Handler.php:763` falls back to `route('login')`;
+  with the route name absent, the callback answers. Deleting either one alone leaves the suite green; changing the
+  callback's *target* fails `test_a_guest_cannot_reach_the_staff_area`. So the honest statement is "the presence is
+  redundant, the value is not".
+- **Two things the login-only app cannot render yet**, carried rather than faked: the header Sign-out form
+  (`layout.blade.php:34-39`, inside `@auth`, reachable only by guests on this task's only page) and
+  `<meta name="csrf-token">` (whose consumer is Task 13's JavaScript). Task 11 must witness the logout form's
+  `_token`; Task 13 must witness the meta tag being read.
+- **CSRF on `/login` cannot be tested the normal way at all.** `VerifyCsrfToken` skips whenever
+  `Application::runningUnitTests()` is true (`Application.php:832-835`, which is just `$this['env'] === 'testing'`),
+  so deleting `@csrf` from the login form, or adding `'login'` to the `validateCsrfTokens` exception list -- the
+  exact edit the brief forbids -- were both green at 178. One row now closes both by flipping the container's
+  `env` for the duration of the test. That is a deliberate hole in the harness and is named as such in the file;
+  it is one row, not a pattern.
+- **One row was written, tested, found to be a false witness, and deleted.** The fix round's "box unchecked means
+  no recall token" row was assigned V8 by the brief and stayed green under it: V8 removes the second argument
+  entirely, so `remember` is `false` for the shipped and the mutated code alike and nothing distinguishes them.
+  Dropping the argument was the wrong arm for that observable. The observable is real and is now pinned by
+  `test_no_recall_token_is_set_when_stay_signed_in_is_left_unchecked` against the arm it does close (V34,
+  `boolean('remember')` -> `true`), which was measured green at 195 before the row existed and fails exactly that
+  row after it.
+
+Counts after R50: baseline **178 passed (408 assertions)** -> 17 candidate rows **195 (445)** -> minus the one
+false witness **194 (442)** -> plus the corrected V34 row **195 passed (445 assertions)**, of which
+`tests/Feature/AuthTest.php` is **26 rows / 76 assertions** (the plan's 7, the 2 the deviations needed, and 17
+from R50). The six non-test source files are byte-identical to the state the arms were run against
+(`routes/web.php 79903b09/772`, `bootstrap/app.php 0ae96855/743`, `LoginController.php ef12297f/1044`,
+`WaCreateUser.php 0071aae6/954`, `layout.blade.php 575da960/2063`, `auth/login.blade.php 152be586/871`); only
+`AuthTest.php` grew, 3385 -> 10085 bytes, sha8 `92989a3f`. The Step 1 and Step 7 fences above are now the shipped
+files, byte for byte.
 
 ---
 

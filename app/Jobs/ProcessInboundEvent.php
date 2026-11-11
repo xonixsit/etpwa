@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\WaContact;
 use App\Models\WaMessage;
+use App\Services\AutoResponder;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 
@@ -70,7 +71,7 @@ class ProcessInboundEvent implements ShouldQueue
             if ($item['sent_at'] !== null) {
                 $contact->touchInbound($item['sent_at']);
             }
-            // Task 7 adds the automatic-response call here.
+            app(AutoResponder::class)->handle($row, $item['button_id']);
         }
     }
 

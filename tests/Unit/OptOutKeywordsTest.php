@@ -3,6 +3,7 @@
 namespace Tests\Unit;
 
 use App\Support\OptOutKeywords;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 class OptOutKeywordsTest extends TestCase
@@ -16,7 +17,7 @@ class OptOutKeywordsTest extends TestCase
         ];
     }
 
-    /** @dataProvider keywordProvider */
+    #[DataProvider('keywordProvider')]
     public function test_first_line_matches_the_fixed_set(string $text)
     {
         $this->assertTrue(OptOutKeywords::matches($text));
@@ -31,7 +32,7 @@ class OptOutKeywordsTest extends TestCase
         ];
     }
 
-    /** @dataProvider notKeywordProvider */
+    #[DataProvider('notKeywordProvider')]
     public function test_does_not_match(?string $text)
     {
         $this->assertFalse(OptOutKeywords::matches($text));
@@ -74,8 +75,8 @@ class OptOutKeywordsTest extends TestCase
      * line -- "I want to opt out now" did not suppress, while "please opt-out now" did. A missed
      * opt-out is the unrecoverable direction, so the phrase must match anywhere in the first line.
      *
-     * @dataProvider phraseProvider
      */
+    #[DataProvider('phraseProvider')]
     public function test_the_two_word_phrase_matches_anywhere(string $text)
     {
         $this->assertTrue(OptOutKeywords::matches($text));
@@ -95,8 +96,8 @@ class OptOutKeywordsTest extends TestCase
      * when they are the entire message. This is the tier that keeps the loose direction honest instead
      * of silencing a client who asked about a deadline.
      *
-     * @dataProvider ambiguousProvider
      */
+    #[DataProvider('ambiguousProvider')]
     public function test_ambiguous_words_do_not_fire_mid_sentence(string $text)
     {
         $this->assertFalse(OptOutKeywords::matches($text));
@@ -107,7 +108,7 @@ class OptOutKeywordsTest extends TestCase
         return [['end'], ['remove'], ['END'], [' remove '], ['end.']];
     }
 
-    /** @dataProvider wholeMessageProvider */
+    #[DataProvider('wholeMessageProvider')]
     public function test_ambiguous_words_still_fire_when_they_are_the_whole_message(string $text)
     {
         $this->assertTrue(OptOutKeywords::matches($text), "'{$text}' is a bare opt-out word");
@@ -121,7 +122,7 @@ class OptOutKeywordsTest extends TestCase
         ];
     }
 
-    /** @dataProvider unambiguousAnywhereProvider */
+    #[DataProvider('unambiguousAnywhereProvider')]
     public function test_unambiguous_words_fire_anywhere_including_the_phrase_ones(string $text)
     {
         $this->assertTrue(OptOutKeywords::matches($text), "'{$text}' should suppress");
@@ -132,8 +133,8 @@ class OptOutKeywordsTest extends TestCase
      * trim() do not see as separators -- so a space can hide the keyword. A hidden keyword is a missed
      * opt-out, the unrecoverable direction, hence the Unicode-aware split.
      *
-     * @dataProvider unicodeSpaceProvider
      */
+    #[DataProvider('unicodeSpaceProvider')]
     public function test_unicode_spaces_do_not_hide_the_keyword(string $text)
     {
         $this->assertTrue(OptOutKeywords::matches($text), 'a non-ASCII space must not hide the keyword');
@@ -147,7 +148,7 @@ class OptOutKeywordsTest extends TestCase
         ];
     }
 
-    /** @dataProvider unicodeSpaceSafeProvider */
+    #[DataProvider('unicodeSpaceSafeProvider')]
     public function test_a_non_ascii_space_alone_does_not_invent_a_keyword(string $text)
     {
         $this->assertFalse(OptOutKeywords::matches($text), 'normalising spaces must not invent a keyword');
@@ -165,8 +166,8 @@ class OptOutKeywordsTest extends TestCase
      * either, and for `end`/`remove` one stray mark defeats the whole-message tier as well as the word
      * scan, because the token no longer equals the keyword.
      *
-     * @dataProvider unicodePunctuationProvider
      */
+    #[DataProvider('unicodePunctuationProvider')]
     public function test_unicode_punctuation_does_not_hide_the_keyword(string $text)
     {
         $this->assertTrue(OptOutKeywords::matches($text), 'a non-ASCII mark must not hide the keyword');
@@ -180,7 +181,7 @@ class OptOutKeywordsTest extends TestCase
         ];
     }
 
-    /** @dataProvider unicodePunctuationSafeProvider */
+    #[DataProvider('unicodePunctuationSafeProvider')]
     public function test_stripping_non_ascii_marks_does_not_invent_a_keyword(string $text)
     {
         $this->assertFalse(OptOutKeywords::matches($text), 'normalising punctuation must not invent a keyword');

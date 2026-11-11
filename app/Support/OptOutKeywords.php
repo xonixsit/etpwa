@@ -7,8 +7,8 @@ class OptOutKeywords
     /** Words that only ever read as an opt-out request, wherever they sit in the line. */
     public const KEYWORDS = ['stop', 'cancel', 'unsubscribe', 'opt-out', 'optout', 'quit'];
 
-    /** Word pairs that mean opt-out only together, in this order. */
-    public const PHRASES = [['opt', 'out']];
+    /** Word sequences that mean opt-out only together, in this order. */
+    public const PHRASES = [['opt', 'out'], ['opt', 'me', 'out']];
 
     /** Ordinary English in a tax conversation, so they count only as the whole message. */
     public const WHOLE_MESSAGE = ['end', 'remove'];
@@ -20,11 +20,8 @@ class OptOutKeywords
         }
 
         $text = trim((string) $text);
-        if ($text === '') {
-            return false;
-        }
 
-        $first = strtolower(trim(trim((string) strtok($text, "\n")), " \t.,!?;:'\""));
+        $first = strtolower((string) strtok($text, "\n"));
         $words = self::words($first);
 
         foreach ($words as $word) {
@@ -47,12 +44,15 @@ class OptOutKeywords
      */
     private static function words(string $line): array
     {
-        // The /u is load-bearing: without it \s is ASCII-only and a U+00A0 from iOS autocorrect glues
-        // "stop" to its neighbour, hiding the keyword. A hidden keyword silences nobody.
-        $raw = preg_split('/\s+/u', $line) ?: [];
+        // Both /u modifiers are load-bearing, and each closes a different way a mark can hide a keyword:
+        // without the split's, an iOS U+00A0 glues "stop" to its neighbour; without the strip's, a curly
+        // quote or a trailing "…" does the same to the token itself -- and a mark that spoils the token
+        // also spoils the one-word whole-message tier, so "end…" is lost twice over. A hidden keyword
+        // silences nobody, which is the unrecoverable direction; stripping only at token boundaries keeps
+        // whole-word discipline, so "stopped", "removal" and "xopt outx" stay silent.
         $clean = [];
-        foreach ($raw as $word) {
-            $word = trim($word, " \t.,!?;:'\"");
+        foreach (preg_split('/\s+/u', $line) ?: [] as $token) {
+            $word = preg_replace('/^[\p{P}\p{S}]+|[\p{P}\p{S}]+$/u', '', $token);
             if ($word !== '') {
                 $clean[] = $word;
             }
@@ -68,10 +68,9 @@ class OptOutKeywords
     private static function containsSequence(array $words, array $sequence): bool
     {
         $span = count($sequence);
-        if (count($words) < $span) {
-            return false;
-        }
 
+        // The bound itself is the length guard: when $span exceeds the line, `0 <= count - $span` is
+        // false and the loop never runs.
         for ($i = 0; $i <= count($words) - $span; $i++) {
             if (array_slice($words, $i, $span) === $sequence) {
                 return true;

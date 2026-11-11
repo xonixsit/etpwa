@@ -3479,6 +3479,7 @@ git commit -m "feat: single Graph write path that records every send attempt"
 namespace Tests\Unit;
 
 use App\Support\OptOutKeywords;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 class OptOutKeywordsTest extends TestCase
@@ -3492,7 +3493,7 @@ class OptOutKeywordsTest extends TestCase
         ];
     }
 
-    /** @dataProvider keywordProvider */
+    #[DataProvider('keywordProvider')]
     public function test_first_line_matches_the_fixed_set(string $text)
     {
         $this->assertTrue(OptOutKeywords::matches($text));
@@ -3507,7 +3508,7 @@ class OptOutKeywordsTest extends TestCase
         ];
     }
 
-    /** @dataProvider notKeywordProvider */
+    #[DataProvider('notKeywordProvider')]
     public function test_does_not_match(?string $text)
     {
         $this->assertFalse(OptOutKeywords::matches($text));
@@ -3550,8 +3551,8 @@ class OptOutKeywordsTest extends TestCase
      * line -- "I want to opt out now" did not suppress, while "please opt-out now" did. A missed
      * opt-out is the unrecoverable direction, so the phrase must match anywhere in the first line.
      *
-     * @dataProvider phraseProvider
      */
+    #[DataProvider('phraseProvider')]
     public function test_the_two_word_phrase_matches_anywhere(string $text)
     {
         $this->assertTrue(OptOutKeywords::matches($text));
@@ -3571,8 +3572,8 @@ class OptOutKeywordsTest extends TestCase
      * when they are the entire message. This is the tier that keeps the loose direction honest instead
      * of silencing a client who asked about a deadline.
      *
-     * @dataProvider ambiguousProvider
      */
+    #[DataProvider('ambiguousProvider')]
     public function test_ambiguous_words_do_not_fire_mid_sentence(string $text)
     {
         $this->assertFalse(OptOutKeywords::matches($text));
@@ -3583,7 +3584,7 @@ class OptOutKeywordsTest extends TestCase
         return [['end'], ['remove'], ['END'], [' remove '], ['end.']];
     }
 
-    /** @dataProvider wholeMessageProvider */
+    #[DataProvider('wholeMessageProvider')]
     public function test_ambiguous_words_still_fire_when_they_are_the_whole_message(string $text)
     {
         $this->assertTrue(OptOutKeywords::matches($text), "'{$text}' is a bare opt-out word");
@@ -3597,7 +3598,7 @@ class OptOutKeywordsTest extends TestCase
         ];
     }
 
-    /** @dataProvider unambiguousAnywhereProvider */
+    #[DataProvider('unambiguousAnywhereProvider')]
     public function test_unambiguous_words_fire_anywhere_including_the_phrase_ones(string $text)
     {
         $this->assertTrue(OptOutKeywords::matches($text), "'{$text}' should suppress");
@@ -3608,8 +3609,8 @@ class OptOutKeywordsTest extends TestCase
      * trim() do not see as separators -- so a space can hide the keyword. A hidden keyword is a missed
      * opt-out, the unrecoverable direction, hence the Unicode-aware split.
      *
-     * @dataProvider unicodeSpaceProvider
      */
+    #[DataProvider('unicodeSpaceProvider')]
     public function test_unicode_spaces_do_not_hide_the_keyword(string $text)
     {
         $this->assertTrue(OptOutKeywords::matches($text), 'a non-ASCII space must not hide the keyword');
@@ -3623,7 +3624,7 @@ class OptOutKeywordsTest extends TestCase
         ];
     }
 
-    /** @dataProvider unicodeSpaceSafeProvider */
+    #[DataProvider('unicodeSpaceSafeProvider')]
     public function test_a_non_ascii_space_alone_does_not_invent_a_keyword(string $text)
     {
         $this->assertFalse(OptOutKeywords::matches($text), 'normalising spaces must not invent a keyword');
@@ -3641,8 +3642,8 @@ class OptOutKeywordsTest extends TestCase
      * either, and for `end`/`remove` one stray mark defeats the whole-message tier as well as the word
      * scan, because the token no longer equals the keyword.
      *
-     * @dataProvider unicodePunctuationProvider
      */
+    #[DataProvider('unicodePunctuationProvider')]
     public function test_unicode_punctuation_does_not_hide_the_keyword(string $text)
     {
         $this->assertTrue(OptOutKeywords::matches($text), 'a non-ASCII mark must not hide the keyword');
@@ -3656,7 +3657,7 @@ class OptOutKeywordsTest extends TestCase
         ];
     }
 
-    /** @dataProvider unicodePunctuationSafeProvider */
+    #[DataProvider('unicodePunctuationSafeProvider')]
     public function test_stripping_non_ascii_marks_does_not_invent_a_keyword(string $text)
     {
         $this->assertFalse(OptOutKeywords::matches($text), 'normalising punctuation must not invent a keyword');
@@ -4392,12 +4393,56 @@ class AckFlowTest extends TestCase
 
     public function test_empty_ack_text_disables_the_rule()
     {
-        // Deliberately no Http::fake() here: setUp's preventStrayRequests() is what makes this test
-        // mean something. If the empty-text guard broke, the send would hit an unstubbed request and the
-        // test would fail with StrayRequestException rather than on the row count.
+        // Deliberately no Http::fake() here: setUp's preventStrayRequests() is what makes the attempt
+        // harmless. It is NOT what fails the test -- the sender catches \Throwable at
+        // WhatsAppSender.php:99 and records a FAILED row instead of letting the exception escape, so a
+        // broken guard shows up as an outbound row, which is what the count below asserts on.
         config(['whatsapp.ack_text' => '']);
         ProcessInboundEvent::dispatchSync($this->inbound('hello'));
         $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
+    }
+
+    /**
+     * R48 witness for the `if ($contact->isOptedOut()) return;` seam in handle().
+     *
+     * Spec §9 promises "never auto-send to a contact where opted_out_at is set, from any code path", and
+     * this seam is the only line that keeps that promise for a contact silenced by an admin (Task 12) or an
+     * import (Task 13) rather than by their own STOP. Every other test in this file reaches the seam with
+     * the window query already answering "no" first, so all of them stay green with the seam deleted --
+     * measured: neutering it left all 165 rows passing. This is the one state where it is the decider:
+     * suppressed contact, a message that is not a keyword, and no inbound inside the 24-hour window.
+     */
+    public function test_a_non_keyword_inbound_from_a_silenced_contact_gets_no_ack()
+    {
+        WaContact::factory()->create(['phone' => '18479043315', 'opted_out_at' => now()->subDays(30)]);
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.ACK1']]], 200)]);
+        ProcessInboundEvent::dispatchSync($this->inbound('hello'));
+
+        $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
+        $this->assertSame(1, WaMessage::where('direction', WaMessage::IN)->count());
+    }
+
+    /**
+     * R48 witness for the window query in acknowledge().
+     *
+     * With CACHE_STORE=array the Cache::add guard answers "no" for every later message the query would
+     * also stop, so no same-day test can tell the two apart -- measured: deleting the query left all 165
+     * rows passing. The state where the query alone decides is an inbound the responder never ran for,
+     * which is exactly what Task 13's import produces: a row in the DB, no cache key behind it.
+     */
+    public function test_an_earlier_inbound_stands_the_ack_down_even_with_an_empty_cache()
+    {
+        $contact = WaContact::factory()->create(['phone' => '18479043315']);
+        WaMessage::record([
+            'wa_contact_id' => $contact->id, 'meta_id' => 'wamid.OLD1', 'direction' => WaMessage::IN,
+            'type' => 'text', 'body' => 'an older inbound', 'status' => WaMessage::INCOMING,
+            'sent_at' => now()->subHours(2), 'raw' => ['text' => ['body' => 'an older inbound']],
+        ]);
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.ACK1']]], 200)]);
+        ProcessInboundEvent::dispatchSync($this->inbound('hello'));
+
+        $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
+        $this->assertSame(2, WaMessage::where('direction', WaMessage::IN)->count());
     }
 
     public function test_two_messages_in_the_same_second_produce_one_ack()
@@ -4421,10 +4466,10 @@ class AckFlowTest extends TestCase
     {
         // R42/R46: Cache::add is the decider in exactly one state -- no earlier inbound row inside the
         // window for this contact, but the ack already claimed. sync dispatch cannot interleave two jobs,
-        // so that state is manufactured here rather than left untested. Deliberately no Http::fake(): if
-        // the guard broke, the send would hit an unstubbed request and preventStrayRequests would fail
-        // the test, which is the witness. This test does NOT prove atomicity -- see R46 for why no test
-        // can, with CACHE_STORE=array.
+        // so that state is manufactured here rather than left untested. Deliberately no Http::fake(): the
+        // attempt is refused by preventStrayRequests, but the failure this test would see is the FAILED
+        // row the sender records for it (WhatsAppSender.php:99), not an escaping exception. This test does
+        // NOT prove atomicity -- see R46 for why no test can, with CACHE_STORE=array.
         $contact = WaContact::factory()->create(['phone' => '18479043315']);
         Cache::add('wa-ack-' . $contact->id, 1, now()->addHours(24));
         ProcessInboundEvent::dispatchSync($this->inbound('hello'));
@@ -4508,7 +4553,7 @@ suite can witness is that a claimed key stands the callback down, which is why
 `Cache::add` is the decider (key present, no earlier inbound row in the window), because `sync` dispatch
 cannot interleave two jobs. `test_two_messages_in_the_same_second_produce_one_ack` then witnesses the pair
 behaving as the deliverable promises, without claiming to prove which of the two guards stopped the second
-one -- in `sync` order it is the window query.
+one. **R48 corrects the last clause: measured, it is `Cache::add`, not the window query.**
 
 - [ ] **Step 4: Run it**
 
@@ -4516,7 +4561,7 @@ one -- in `sync` order it is the window query.
 php artisan test tests/Feature/AckFlowTest.php
 ```
 
-Expected: 7 passed. If `test_first_inbound_of_the_day_gets_one_ack` fails with 0 outbound rows, check that
+Expected: 9 passed (21 assertions). If `test_first_inbound_of_the_day_gets_one_ack` fails with 0 outbound rows, check that
 the `where('id', '!=', $in->id)` exclusion survived the edit -- that is R46's failure mode, not a test bug.
 
 - [ ] **Step 5: Run the whole suite**
@@ -4525,12 +4570,66 @@ the `where('id', '!=', $in->id)` exclusion survived the edit -- that is R46's fa
 php artisan test
 ```
 
-Expected: **165 passed** (the 158 that Task 7 closed on after R47, plus this task's 7), no warnings. Report the
+Expected: **167 passed** (the 158 that Task 7 closed on after R47, plus this task's 9), no warnings -- R48 removed the 10 `@dataProvider` warnings the R47 round left behind. Report the
 assertion count you observe; it is what the next task's brief will quote. Then, per R42, mutate every guard
 this task adds -- the `$text === ''` return, the `$alreadyTalking` return, the `Cache::add` return, the
 `isOptedOut()` return, and the `where('id', '!=', $in->id)` exclusion -- and record which test fails for
 each with `landed=` proof. The exclusion is the one that will tempt a silent reimplementation: deleting it
-does not crash anything, it just stops every acknowledgement.
+does not crash anything, it just stops every acknowledgement. Two of the five had no witness as this step was
+first written -- see **R48** below for the measurements and the two tests that close it.
+
+**R48 -- the two guards this task shipped without witnesses now have them; three ledger claims corrected.**
+
+The implementation round ran the R42 battery over all five guards Step 3 adds. Two of them left the whole suite green:
+
+| guard in `AutoResponder.php` | mutation | suite as Step 1 shipped | witness after R48 |
+| --- | --- | --- | --- |
+| `$text === ''` return | → `if (false)` | 2 failed (this task's row + `IngestRowsTest` collateral) | `test_empty_ack_text_disables_the_rule` |
+| `$alreadyTalking` window query | → `if (false)` | **0 failed, 165 passed** | `test_an_earlier_inbound_stands_the_ack_down_even_with_an_empty_cache` |
+| `Cache::add` return | → `if (false)` | 1 failed | `test_a_claimed_cache_key_is_what_stands_the_callback_down` |
+| `isOptedOut()` seam in `handle()` | → `if (false)` | **0 failed, 165 passed** | `test_a_non_keyword_inbound_from_a_silenced_contact_gets_no_ack` |
+| `where('id', '!=', $in->id)` | line deleted | 4 failed | all four positive-ack rows |
+
+Those five rows are the controller's own re-runs on the shipped bytes, each with `landed=` proof and restore
+verified byte-identical. The two green arms are not dead code -- each has exactly one reachable state in which
+it is the decider, and none of Step 1's seven tests enters it:
+
+- With `CACHE_STORE=array` the *first* message claims the cache key, so `Cache::add` alone stops the second
+  and the window query is never the difference. The state where the query decides is an inbound row that
+  never went through the responder at all -- which is Task 13's `wa:import-send-log`, not a live callback.
+- An inbound `STOP` returns inside the keyword branch (`AutoResponder.php:33`) and never reaches the seam.
+  The `OptOutFlowTest` row that sends a non-keyword message to a silenced contact is stood down by the
+  window query first.
+
+So the spec §9 promise "never auto-send to a contact where `opted_out_at` is set, from any code path" was
+being enforced by one line with no test behind it, and the once-per-24-hours promise by a query no test
+isolated. Suppression is compliance-facing, so both get witnesses rather than a written report: the two tests
+above were added to `AckFlowTest`, which is why Task 8 ships **9** tests, not 7.
+
+Three ledger claims corrected:
+
+1. R46's closing sentence ("in `sync` order it is the window query") is wrong. Measured: with the window
+   query neutered, `test_two_messages_in_the_same_second_produce_one_ack` still passes -- the guard that
+   stands the second callback down is `Cache::add`, whose second call on the array store returns `false`
+   without being atomic. R46's substance (no test may claim atomicity, because the production store is the
+   only one that provides it) is untouched; this is a misattribution of which guard fires.
+2. Step 1's comments attributed two failures to `StrayRequestException`. Measured: both fail on the row
+   count. `WhatsAppSender::post()` catches `\Throwable` (`WhatsAppSender.php:99`) and records a `FAILED` row
+   with `error_code='network'` (`:100-106`), so the stray-request exception never reaches the test. The
+   witnesses still work -- an unstubbed request still becomes an outbound row the counts see -- and the
+   comments now say so. No live request is made either way.
+3. The implementation brief's "deleting the exclusion must fail exactly one test" measured four. A wrong
+   prediction in the brief, not a defect in the code: the exclusion has more witnesses than it needed.
+
+Also folded in: the R47 round left 10 `WARN Metadata found in doc-comment for method
+Tests\Unit\OptOutKeywordsTest::...` lines, which made Step 5's "no warnings" false. Fixed by converting all
+10 `@dataProvider` annotations in that file to `#[DataProvider]` attributes -- same 77 rows and 82
+assertions, zero warnings, and one file less that would break when PHPUnit 12 drops the doc-comment form.
+Ledger-label note for future briefs: "unit 77/82" means `tests/Unit/OptOutKeywordsTest.php` alone;
+`php artisan test tests/Unit` is 84 passed (89 assertions). Say which one a count refers to.
+
+Counts after R48: `AckFlowTest` 9 passed (21 assertions), full suite **167 passed (364 assertions)**, no
+warnings.
 
 - [ ] **Step 6: Commit**
 
@@ -5636,6 +5735,12 @@ so in the ledger.
 
 **Consumes:** `WaContact::fromPhone()`, `WaMessage::record()`.
 **Produces:** `php artisan wa:import-send-log {path} {--apply}` printing counts; refused rows are counted as skipped and never become messages.
+**Carried from R48:** the import writes message rows that never went through `AutoResponder`, so no `wa-ack-<contact>` cache key
+stands behind them. That is the one state in which the 24-hour window query, and not `Cache::add`, decides whether a
+contact gets acknowledged -- Task 8's `test_an_earlier_inbound_stands_the_ack_down_even_with_an_empty_cache` pins it for a
+row two hours old. Neither guard is tested against a row **older** than the window whose key is still alive, because the
+key's TTL is anchored at `now()` while the query looks at `sent_at`; an import of a months-old send log is exactly how
+that shape appears. If this task can produce it, record that in its report rather than assuming Task 8 covered it.
 
 - [ ] **Step 1: Create the fixture** `tests/Fixtures/send_log_sample.csv` (same columns as the real log; the third row is a refusal, the fourth a blank line):
 

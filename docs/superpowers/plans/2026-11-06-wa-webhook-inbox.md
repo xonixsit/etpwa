@@ -6,14 +6,14 @@
 
 **Architecture:** One small Laravel 12 app on its own subdomain with its own MySQL database. A signature-verified webhook endpoint stores the event and returns 200 immediately; a queued job normalises each parsed item into `wa_contacts` / `wa_messages` rows and applies two narrow auto-reply rules through one send service. An authenticated inbox reads those rows and replies through the same service. Two bearer-token machine endpoints expose the suppression list and accept send records from the Python bench, which becomes fail-closed: no suppression list, no send.
 
-**Tech Stack:** PHP 8.2.12 local / 8.2.35 on host, Laravel Framework 12.71.0, PHPUnit 11.5.50, Guzzle 7.16.1 (already installed), MariaDB 10.4.32 local (`C:\xampp\mysql`), MySQL on Plesk, Python 3 stdlib for the bench.
+**Tech Stack:** PHP 8.2.12 local / 8.2.35 on host, Laravel Framework 12.71.0, PHPUnit 11.5.57, Guzzle 7.16.1 (already installed), MariaDB 10.4.32 local (`C:\xampp\mysql`), MySQL on Plesk, Python 3 stdlib for the bench.
 
 **Spec:** `docs/superpowers/specs/2026-11-06-wa-webhook-inbox-design.md`
 
 ## Global Constraints
 
 - Work in `D:\etp-wa-inbox` (bash: `/d/etp-wa-inbox`). Git is initialised; commit after every task.
-- **No new Composer packages.** `laravel/framework` 12.71.0, `phpunit/phpunit` 11.5.50 and `guzzlehttp/guzzle` 7.16.1 are already installed. Never run `composer require`.
+- **No new Composer packages.** `laravel/framework` 12.71.0, `phpunit/phpunit` 11.5.57 and `guzzlehttp/guzzle` 7.16.1 are already installed (measured with `vendor/bin/phpunit --version`; the plan said 11.5.50 until R49). Never run `composer require`.
 - The app runs on MySQL/MariaDB. **Tests run on sqlite `:memory:`** (`phpunit.xml` already sets `DB_CONNECTION=sqlite`). Every migration must be valid on MariaDB 10.4, MySQL 8 and sqlite: no `enum` columns, no MySQL-8-only syntax, no functional indexes, `longText` for encrypted columns.
 - Secrets (`WA_ACCESS_TOKEN`, `WA_APP_SECRET`, `WA_VERIFY_TOKEN`, `WA_EXPORT_TOKEN`) live in `.env` only (already gitignored). Never echo one into a response, a log line, a test fixture, or chat. Test values are the literal strings `appsecret-test`, `verify-test`, `export-test`.
 - Message body text and stored payloads are encrypted with Laravel's `encrypted` cast, so sqlite's `text` columns are used for those columns in tests and `longText` in migrations.
@@ -4325,6 +4325,14 @@ class AckFlowTest extends TestCase
         Http::preventStrayRequests();
     }
 
+    protected function tearDown(): void
+    {
+        // Carbon's test-now is a process-wide static; the re-arm test freezes it and nothing else here
+        // would ever see the real clock again.
+        Carbon::setTestNow();
+        parent::tearDown();
+    }
+
     private function inbound(string $body, string $phone = '18479043315', ?CarbonInterface $at = null): array
     {
         // R46: the third parameter exists because two of the tests below have to put two messages in the
@@ -4407,10 +4415,12 @@ class AckFlowTest extends TestCase
      *
      * Spec §9 promises "never auto-send to a contact where opted_out_at is set, from any code path", and
      * this seam is the only line that keeps that promise for a contact silenced by an admin (Task 12) or an
-     * import (Task 13) rather than by their own STOP. Every other test in this file reaches the seam with
-     * the window query already answering "no" first, so all of them stay green with the seam deleted --
-     * measured: neutering it left all 165 rows passing. This is the one state where it is the decider:
-     * suppressed contact, a message that is not a keyword, and no inbound inside the 24-hour window.
+     * import (Task 13) rather than by their own STOP. Deleting the seam left all 165 rows green, because no
+     * other row in this file is a suppressed contact that reaches it -- the STOP message returns inside the
+     * keyword branch (`AutoResponder.php:33`) and never gets here, and the one `OptOutFlowTest` row that
+     * sends a non-keyword message to a silenced contact would be stood down by the window query (`:56`) even
+     * without the seam, because its own STOP is an inbound inside the window. This is the state where the
+     * seam alone decides: suppressed contact, a message that is not a keyword, no inbound in the window.
      */
     public function test_a_non_keyword_inbound_from_a_silenced_contact_gets_no_ack()
     {
@@ -4443,6 +4453,71 @@ class AckFlowTest extends TestCase
 
         $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
         $this->assertSame(2, WaMessage::where('direction', WaMessage::IN)->count());
+    }
+
+    /**
+     * R49 witness for the length of the window -- the two 24-hour numbers, the query's lower bound
+     * (`AutoResponder.php:59`) and the cache key's TTL (`:67`). Widening *either* to 30 days left the whole
+     * suite green as this file stood, i.e. nothing pinned "per day" rather than "per month". Freezing the
+     * clock is the only way to reach the state where they decide: the key must expire (ArrayStore computes
+     * expiry from Carbon::now(), which honours the freeze) and the earlier message must fall outside the
+     * window.
+     */
+    public function test_the_contact_is_acknowledged_again_once_the_window_has_passed()
+    {
+        Http::fake(['*' => Http::sequence()
+            ->push(['messages' => [['id' => 'wamid.ACK1']]], 200)
+            ->push(['messages' => [['id' => 'wamid.ACK2']]], 200)]);
+        ProcessInboundEvent::dispatchSync($this->inbound('hello'));
+
+        Carbon::setTestNow(now()->addHours(25));
+        ProcessInboundEvent::dispatchSync($this->inbound('a day later'));
+
+        $this->assertSame(2, WaMessage::where('direction', WaMessage::OUT)->count());
+        $this->assertDatabaseHas('wa_messages', ['meta_id' => 'wamid.ACK2']);
+    }
+
+    /**
+     * R49 witness for `->where('direction', WaMessage::IN)` in the window query. Deleting the filter left
+     * the suite green, and the state it permits is the ordinary one: staff reply in the afternoon, the
+     * contact's first message next morning -- and no acknowledgement, because an outbound row of our own
+     * counted as "this contact is already talking".
+     */
+    public function test_a_staff_reply_inside_the_window_does_not_stand_the_ack_down()
+    {
+        $contact = WaContact::factory()->create(['phone' => '18479043315']);
+        WaMessage::record([
+            'wa_contact_id' => $contact->id, 'meta_id' => 'wamid.STAFF1', 'direction' => WaMessage::OUT,
+            'type' => 'text', 'body' => 'here is your filing quote', 'status' => WaMessage::SENT,
+            'sent_at' => now()->subHours(2), 'raw' => ['text' => ['body' => 'here is your filing quote']],
+        ]);
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.ACK1']]], 200)]);
+        ProcessInboundEvent::dispatchSync($this->inbound('hello'));
+
+        $this->assertSame(2, WaMessage::where('direction', WaMessage::OUT)->count());
+        $this->assertDatabaseHas('wa_messages', ['meta_id' => 'wamid.ACK1', 'auto_reply' => true]);
+    }
+
+    /**
+     * R49 witness for the window's upper bound (`sent_at < $at + 1s`). Meta redelivers a webhook it already
+     * delivered, so an older message can be processed after a newer one; the bound says only rows at or
+     * before the message being handled may stand it down. Without it (measured: suite green) the decision
+     * reads rows that have not happened yet. The cache key normally hides the difference, so the state is
+     * manufactured the way the import path does it: a stored row with no key behind it.
+     */
+    public function test_a_row_recorded_after_this_message_does_not_stand_the_ack_down()
+    {
+        $contact = WaContact::factory()->create(['phone' => '18479043315']);
+        WaMessage::record([
+            'wa_contact_id' => $contact->id, 'meta_id' => 'wamid.LATER1', 'direction' => WaMessage::IN,
+            'type' => 'text', 'body' => 'a newer message, stored first', 'status' => WaMessage::INCOMING,
+            'sent_at' => now()->addMinutes(5), 'raw' => ['text' => ['body' => 'a newer message, stored first']],
+        ]);
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.ACK1']]], 200)]);
+        ProcessInboundEvent::dispatchSync($this->inbound('hello'));
+
+        $this->assertSame(1, WaMessage::where('direction', WaMessage::OUT)->count());
+        $this->assertDatabaseHas('wa_messages', ['meta_id' => 'wamid.ACK1']);
     }
 
     public function test_two_messages_in_the_same_second_produce_one_ack()
@@ -4561,7 +4636,7 @@ one. **R48 corrects the last clause: measured, it is `Cache::add`, not the windo
 php artisan test tests/Feature/AckFlowTest.php
 ```
 
-Expected: 9 passed (21 assertions). If `test_first_inbound_of_the_day_gets_one_ack` fails with 0 outbound rows, check that
+Expected: 12 passed (27 assertions). If `test_first_inbound_of_the_day_gets_one_ack` fails with 0 outbound rows, check that
 the `where('id', '!=', $in->id)` exclusion survived the edit -- that is R46's failure mode, not a test bug.
 
 - [ ] **Step 5: Run the whole suite**
@@ -4570,13 +4645,15 @@ the `where('id', '!=', $in->id)` exclusion survived the edit -- that is R46's fa
 php artisan test
 ```
 
-Expected: **167 passed** (the 158 that Task 7 closed on after R47, plus this task's 9), no warnings -- R48 removed the 10 `@dataProvider` warnings the R47 round left behind. Report the
+Expected: **170 passed** (the 158 that Task 7 closed on after R47, plus this task's 12 -- R48 added two rows and R49 three more), no warnings -- R48 removed the 10 `@dataProvider` warnings the R47 round left behind. Report the
 assertion count you observe; it is what the next task's brief will quote. Then, per R42, mutate every guard
 this task adds -- the `$text === ''` return, the `$alreadyTalking` return, the `Cache::add` return, the
 `isOptedOut()` return, and the `where('id', '!=', $in->id)` exclusion -- and record which test fails for
 each with `landed=` proof. The exclusion is the one that will tempt a silent reimplementation: deleting it
 does not crash anything, it just stops every acknowledgement. Two of the five had no witness as this step was
-first written -- see **R48** below for the measurements and the two tests that close it.
+first written (**R48**), and the review of the result found four more arms nobody had tried at all (**R49**).
+Counting the guards is not enough: mutate the *constants* too -- the window length, the TTL, the direction
+filter and the upper bound each survived deletion with the suite green.
 
 **R48 -- the two guards this task shipped without witnesses now have them; three ledger claims corrected.**
 
@@ -4630,6 +4707,59 @@ Ledger-label note for future briefs: "unit 77/82" means `tests/Unit/OptOutKeywor
 
 Counts after R48: `AckFlowTest` 9 passed (21 assertions), full suite **167 passed (364 assertions)**, no
 warnings.
+
+**R49 -- the window's shape had no witnesses: four arms the review found, three tests that close them.**
+
+The independent review of Task 8 did not re-run R48's five arms; it invented new ones, and four of them left
+the suite green on the code as R48 shipped it. All four were reproduced here, and all four are now witnessed by
+rows added to `AckFlowTest`, which is why Task 8 ships **12** tests:
+
+| arm | mutation | suite as R48 shipped | witness after R49 |
+| --- | --- | --- | --- |
+| MT-A | delete `->where('direction', WaMessage::IN)` from the window query | **0 failed, 167 passed** | `test_a_staff_reply_inside_the_window_does_not_stand_the_ack_down` |
+| MT-B | delete the upper bound `->where('sent_at', '<', $at->copy()->addSecond())` | **0 failed, 167 passed** | `test_a_row_recorded_after_this_message_does_not_stand_the_ack_down` |
+| MT-C | cache TTL `now()->addHours($hours)` → `now()->addDays(30)` | **0 failed, 167 passed** | `test_the_contact_is_acknowledged_again_once_the_window_has_passed` |
+| MT-H | query lower bound `subHours($hours)` → `subDays(30)` | **0 failed, 167 passed** | the same re-arm row |
+| M5 re-run | delete the R46 own-row exclusion | 4 failed as R48 recorded | now **7** failed -- the three new rows also depend on it |
+
+Mutated hashes for the record: MT-A `3c3f60fd`, MT-B `65a3adb4`, MT-C `5b24947c`, MT-H `573b65b4`, every arm
+restored byte-identical to `81ea9b95…` with `hits=1` proof; `AutoResponder.php` itself was not edited this round.
+
+MT-A is the one that would have hurt: with the filter gone, **our own outbound rows count as "this contact is
+already talking"**, so an afternoon staff reply silences the next morning's first message -- the exact case the
+rule exists to serve. MT-C and MT-H are the two halves of "24 hours": widening either to a month still
+satisfies every other row in the file, because none of them crossed the boundary; the re-arm row freezes the
+clock 25 hours (`Carbon::setTestNow`, reset in `tearDown` -- the test-now static is process-wide) and requires
+the second ack. MT-B only matters for out-of-order redelivery, which the cache key usually masks, so it is
+manufactured the way the import path does it: a stored row with no key behind it.
+
+One false statement shipped by R48 and corrected here: the silenced-contact docblock claimed the other rows
+"reach the seam with the window query already answering 'no' first". That is the wrong order -- the seam is
+`AutoResponder.php:36` and the query is `:56`, inside `acknowledge()`, which the seam returns past. The real
+reason those rows do not witness the seam is that none of them *is* a suppressed contact reaching it: the STOP
+row returns at `:33`, and `OptOutFlowTest::test_no_acknowledgement_is_sent_to_an_opted_out_contact` would be
+suppressed by the query even with the seam gone, because its own STOP is an inbound inside the window.
+
+Recorded, deliberately **not** changed:
+
+- **Two clocks, one rule.** The TTL (`:67`) is anchored at `now()`, the window (`:59`) at the message's
+  `sent_at`. For live callbacks the two are the same instant; for an imported row they are not, and the pair
+  can disagree (a row older than the window whose key is still alive suppresses, and vice versa). No test
+  pins the disagreement because no realistic state needs it resolved -- Task 13 carries the note.
+- **A refused ack is burned for the window.** The key is claimed before `sendText`, and the sender never
+  throws (`WhatsAppSender.php:99-106` records a `FAILED` row), so a network failure costs that contact its
+  acknowledgement for the rest of the window rather than retrying on their next message. Accepted: the
+  alternative re-attempts a send Meta has just refused, on an account whose quality rating is the thing we
+  are protecting. If the owner wants retry-on-failure, that is a deliberate change, not an oversight.
+- **`test_a_claimed_cache_key_is_what_stands_the_callback_down` re-hardcodes** `'wa-ack-'` and
+  `addHours(24)` instead of reading `window_hours`. Plan-fenced code, unchanged; if the key format or the
+  TTL ever moves, that row goes red for a reason a reader can find.
+
+Task 16 gains checklist item 11 so the live number, not sqlite, answers the one thing this round still cannot:
+does a second-day message actually get acknowledged again on a real handset.
+
+Counts after R49: `AckFlowTest` 12 passed (27 assertions), full suite **170 passed (370 assertions)**, no
+warnings. Also corrected: the stack line said PHPUnit 11.5.50; the installed binary reports **11.5.57**.
 
 - [ ] **Step 6: Commit**
 
@@ -6554,8 +6684,12 @@ Expected: `401`.
 10. **Empty `WA_OPT_OUT_TEXT` behaviour (R42).** With the confirmation text unset, an opt-out is still
     *suppressed* but no confirmation is sent, silently. Check the key is set on the host before go-live, or
     expect silenced clients who were never told they were silenced.
+11. **The re-arm on a real handset (R49).** The suite proves the 24-hour window with a frozen clock on sqlite.
+    Send one message from the test number, then another more than `window_hours` later, and confirm the second
+    one is acknowledged too. Nothing here can prove the production cache store expires the key -- R46 covers
+    why, and only the live number can answer it.
 
-- [ ] **Step 6: Record the outcome** in `docs/DEPLOY.md` — the ten lines above, each marked pass or fail with what was seen, then commit:
+- [ ] **Step 6: Record the outcome** in `docs/DEPLOY.md` — the eleven lines above, each marked pass or fail with what was seen, then commit:
 
 ```bash
 cd /d/etp-wa-inbox && git add docs/DEPLOY.md && git commit -m "docs: deploy and live acceptance record"

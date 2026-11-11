@@ -4024,6 +4024,20 @@ shapes out of "missed opt-out". **Not adopted:** a zero-width joiner *inside* a 
 still does not match -- deleting a client's characters to manufacture a keyword is a different act from
 treating a space as a space. Recorded as a known limit.
 
+**Known limits of the tier, measured on the shipped matcher and NOT re-litigated with the owner.** The
+whole-message tier silences nobody for `"end now"`, `"remove me"`, `"please remove"`,
+`"I want to end this"`, `"I'd like to be removed"` -- all → no. The phrase tier silences clients who did not
+ask to be silenced for `"the opt out link is broken"` and `"do not opt out of the survey"` -- both → HIT.
+`test_ambiguous_words_do_not_fire_mid_sentence` deliberately pins the first group, so the suite defends the
+miss: it is asserting the owner's chosen policy, not an oversight. Because a missed opt-out is the direction
+with no recovery path, this list goes to the account owner before any live send (Task 16 checklist), and the
+cheap knob if they want it tighter is one word moved from `WHOLE_MESSAGE` to `KEYWORDS` plus that test's rows
+updated -- no structural change.
+
+Spec §9's opt-out bullet is amended to this ruling in the same commit; it previously stated the flat set
+whose algorithm made `opt out` unreachable, and leaving the two documents disagreeing is what R45 exists to
+stop.
+
 Witnesses and mutations, all re-run on these files with `landed=` proof and restore verified byte-identical:
 
 | mutation | observed failure |

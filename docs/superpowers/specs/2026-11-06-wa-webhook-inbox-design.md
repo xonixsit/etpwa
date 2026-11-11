@@ -168,10 +168,14 @@ here; this app has its own key.
 Both run in the queued job, after the inbound row is stored.
 
 - **Opt-out.** The first line of an inbound text message is lowercased, stripped of surrounding
-  punctuation and split on whitespace; if *any* word in it belongs to the fixed set `stop`, `end`,
-  `cancel`, `unsubscribe`, `opt out`, `opt-out`, `optout`, `quit`, `remove` the message is an opt-out
-  (so "please STOP and email me" counts). A Meta `interactive` button reply whose id is `STOP` counts
-  too. Then: set `opted_out_at`,
+  punctuation and split on whitespace — Unicode-aware, so a U+00A0 from an iOS keyboard is still a
+  separator. Matching is tiered (plan ruling R45, which replaced this section's original single flat set
+  after a review found that a two-word entry can never equal a word): the words `stop`, `cancel`,
+  `unsubscribe`, `opt-out`, `optout`, `quit`, plus the two-word phrase `opt out` in that order, count
+  anywhere in the line (so "please STOP and email me" and "I want to opt out now" both count), while
+  `end` and `remove` count only when the whole message is that one word — in a filing conversation
+  "does the fiscal year end in december" is a question, not an opt-out. A Meta `interactive` button
+  reply whose id is `STOP` counts too. Then: set `opted_out_at`,
   `opt_out_source = inbound_keyword`, and send one free-form confirmation — "You won't get any more
   messages from us on this number." Suppression is applied in the same job, before the send is
   attempted, so the gate is closed whether or not the confirmation reaches the handset. The

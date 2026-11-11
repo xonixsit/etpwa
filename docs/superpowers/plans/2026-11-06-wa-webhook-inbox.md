@@ -3525,6 +3525,79 @@ class OptOutKeywordsTest extends TestCase
         $this->assertTrue(OptOutKeywords::matches('anything', 'stop'));
         $this->assertFalse(OptOutKeywords::matches('anything', 'TALK_TO_AGENT'));
     }
+
+    public static function phraseProvider(): array
+    {
+        return [
+            ['I want to opt out now'], ['please opt out'], ['opt out please'],
+            ['OPT OUT'], [' opt out.'], ['i want to opt out of these messages'],
+        ];
+    }
+
+    /**
+     * R45: "opt out" is two words, so the old word-by-word scan could only ever match it as a whole
+     * line -- "I want to opt out now" did not suppress, while "please opt-out now" did. A missed
+     * opt-out is the unrecoverable direction, so the phrase must match anywhere in the first line.
+     *
+     * @dataProvider phraseProvider
+     */
+    public function test_the_two_word_phrase_matches_anywhere(string $text)
+    {
+        $this->assertTrue(OptOutKeywords::matches($text));
+    }
+
+    public static function ambiguousProvider(): array
+    {
+        return [
+            ['does the fiscal year end in december'], ['end of month pricing'],
+            ['when does the form end'], ['remove the filing later'], ['please remove me'],
+            ['I want to end the call earlier'],
+        ];
+    }
+
+    /**
+     * R45: `end` and `remove` are ordinary English in a tax conversation, so they only mean opt-out
+     * when they are the entire message. This is the tier that keeps the loose direction honest instead
+     * of silencing a client who asked about a deadline.
+     *
+     * @dataProvider ambiguousProvider
+     */
+    public function test_ambiguous_words_do_not_fire_mid_sentence(string $text)
+    {
+        $this->assertFalse(OptOutKeywords::matches($text));
+    }
+
+    public function test_ambiguous_words_still_fire_when_they_are_the_whole_message()
+    {
+        foreach (['end', 'remove', 'END', ' remove ', 'end.'] as $text) {
+            $this->assertTrue(OptOutKeywords::matches($text), "'{$text}' is a bare opt-out word");
+        }
+    }
+
+    public function test_unambiguous_words_fire_anywhere_including_the_phrase_ones()
+    {
+        foreach (['please STOP and email me', 'you can unsubscribe me now', 'cancel my plan',
+                       'I quit this service', 'optout of everything'] as $text) {
+            $this->assertTrue(OptOutKeywords::matches($text), "'{$text}' should suppress");
+        }
+    }
+
+    /**
+     * Reviewer F-4: iOS autocorrect and pasted text emit U+00A0 and friends, which an ASCII-only \s and
+     * trim() do not see as separators -- so a space can hide the keyword. A hidden keyword is a missed
+     * opt-out, the unrecoverable direction, hence the Unicode-aware split. A space with no keyword in it
+     * must still be silent, which is the second half of the loop.
+     */
+    public function test_unicode_spaces_do_not_hide_the_keyword()
+    {
+        foreach (["\u{00A0}stop", "stop\u{00A0}sending", "opt\u{00A0}out", "\u{2009}stop",
+                       "\u{3000}unsubscribe", "please\u{00A0}opt out", "\u{00A0}end"] as $text) {
+            $this->assertTrue(OptOutKeywords::matches($text), 'a non-ASCII space must not hide the keyword');
+        }
+        foreach (["\u{00A0}hello there", "what\u{00A0}time do you end"] as $text) {
+            $this->assertFalse(OptOutKeywords::matches($text), 'normalising spaces must not invent a keyword');
+        }
+    }
 }
 ```
 
@@ -3541,9 +3614,14 @@ namespace App\Support;
 
 class OptOutKeywords
 {
-    public const KEYWORDS = [
-        'stop', 'end', 'cancel', 'unsubscribe', 'opt out', 'opt-out', 'optout', 'quit', 'remove',
-    ];
+    /** Words that only ever read as an opt-out request, wherever they sit in the line. */
+    public const KEYWORDS = ['stop', 'cancel', 'unsubscribe', 'opt-out', 'optout', 'quit'];
+
+    /** Word pairs that mean opt-out only together, in this order. */
+    public const PHRASES = [['opt', 'out']];
+
+    /** Ordinary English in a tax conversation, so they count only as the whole message. */
+    public const WHOLE_MESSAGE = ['end', 'remove'];
 
     public static function matches(?string $text, ?string $buttonId = null): bool
     {
@@ -3556,17 +3634,61 @@ class OptOutKeywords
             return false;
         }
 
-        $first = trim(strtolower(strtok($text, "\n")));
-        $first = trim($first, " \t.,!?;:'\"");
-        // "please STOP and email me" -> collapse to the words around it
-        $words = preg_split('/\s+/', $first) ?: [];
+        $first = strtolower(trim(trim((string) strtok($text, "\n")), " \t.,!?;:'\""));
+        $words = self::words($first);
+
         foreach ($words as $word) {
             if (in_array($word, self::KEYWORDS, true)) {
                 return true;
             }
         }
 
-        return in_array($first, self::KEYWORDS, true);
+        foreach (self::PHRASES as $phrase) {
+            if (self::containsSequence($words, $phrase)) {
+                return true;
+            }
+        }
+
+        return count($words) === 1 && in_array($words[0], self::WHOLE_MESSAGE, true);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private static function words(string $line): array
+    {
+        // The /u is load-bearing: without it \s is ASCII-only and a U+00A0 from iOS autocorrect glues
+        // "stop" to its neighbour, hiding the keyword. A hidden keyword silences nobody.
+        $raw = preg_split('/\s+/u', $line) ?: [];
+        $clean = [];
+        foreach ($raw as $word) {
+            $word = trim($word, " \t.,!?;:'\"");
+            if ($word !== '') {
+                $clean[] = $word;
+            }
+        }
+
+        return $clean;
+    }
+
+    /**
+     * @param  list<string>  $words
+     * @param  list<string>  $sequence
+     */
+    private static function containsSequence(array $words, array $sequence): bool
+    {
+        $span = count($sequence);
+        if (count($words) < $span) {
+            return false;
+        }
+
+        for ($i = 0; $i <= count($words) - $span; $i++) {
+            if (array_slice($words, $i, $span) === $sequence) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
 ```
@@ -3577,9 +3699,9 @@ class OptOutKeywords
 php artisan test tests/Unit/OptOutKeywordsTest.php
 ```
 
-Expected: all data rows pass. Note the deliberate looseness: any single STOP-family word anywhere in the first line opts the contact out. A false opt-out costs one silenced client; a missed one costs a complaint against the account's quality rating.
+Expected: 43 passed (62 assertions).
 
-The negative rows test whole-word discipline (`stopped`, `stopwatch`, `nonstop` must not fire), not sentence intent. "i want to stop paying taxes" **does** suppress that contact, and that is intended: suppression blocks outbound sends only, the inbound message is still stored and still visible in the thread, so a human can read it and call them. A missed opt-out has no such recovery path.
+The matcher is tiered, not a single flat list -- **R45** below is the ruling and the measurements behind it. `stop`, `cancel`, `unsubscribe`, `opt-out`, `optout`, `quit` and the phrase `opt out` match anywhere in the first line; `end` and `remove` only when they are the whole message; a non-ASCII space never hides any of them. So "i want to stop paying taxes" and "cancel my filing" suppress, and "does the fiscal year end in december" does not. Suppression blocks outbound sends only -- the inbound message is still stored and still visible in the thread, so a human can read it and call them. A missed opt-out has no such recovery path, which is why the ambiguous words got the tighter tier rather than the phrase getting the looser one.
 
 - [ ] **Step 5: Write the failing feature test** — `tests/Feature/OptOutFlowTest.php`
 
@@ -3717,6 +3839,26 @@ class OptOutFlowTest extends TestCase
         $this->assertSame(1, WaMessage::count(), 'the inbound STOP only -- no empty confirmation');
     }
 
+    public function test_the_one_time_rule_is_per_contact_not_global()
+    {
+        // R42/F-3: every other test in this class uses one phone, so a `wasSilenced` flag that was
+        // accidentally global -- one cache key, one static, one row consulted by contact id 1 -- would
+        // still pass all seven. Two contacts must each get their own confirmation.
+        Http::fake(['*' => Http::sequence()
+            ->push(['messages' => [['id' => 'wamid.CONF1']]], 200)
+            ->push(['messages' => [['id' => 'wamid.CONF2']]], 200)]);
+        ProcessInboundEvent::dispatchSync($this->inbound('STOP', 'wamid.S1'));
+        $other = $this->inbound('STOP', 'wamid.S2');
+        $other['phone'] = '19014307897';
+        ProcessInboundEvent::dispatchSync($other);
+
+        $this->assertTrue(WaContact::where('phone', '18479043315')->firstOrFail()->isOptedOut());
+        $this->assertTrue(WaContact::where('phone', '19014307897')->firstOrFail()->isOptedOut());
+        $this->assertSame(2, WaMessage::where('direction', WaMessage::OUT)->count());
+        $this->assertDatabaseHas('wa_messages', ['meta_id' => 'wamid.CONF1']);
+        $this->assertDatabaseHas('wa_messages', ['meta_id' => 'wamid.CONF2']);
+    }
+
     public function test_quick_reply_button_id_stops()
     {
         // Body text is not a keyword: only the button id can trigger this.
@@ -3728,7 +3870,6 @@ class OptOutFlowTest extends TestCase
         $this->assertTrue(WaContact::where('phone', '18479043315')->firstOrFail()->isOptedOut());
     }
 }
-
 ```
 
 - [ ] **Step 6: Run it** — expected FAIL `Class "App\Services\AutoResponder" not found`.
@@ -3837,7 +3978,7 @@ temp copy). Four mutations are lethal:
 
 | mutation | caught by | observed failure |
 | --- | --- | --- |
-| `OptOutKeywords::matches(...)` branch → `if (false)` | 5 of the 7 tests | `Failed asserting that false is true.` at the `isOptedOut()` assert |
+| `OptOutKeywords::matches(...)` branch → `if (false)` | 6 of the 8 tests | `Failed asserting that false is true.` at the `isOptedOut()` assert |
 | `$wasSilenced = $contact->isOptedOut()` → `= false` | `test_second_stop_does_not_confirm_again` | `assertDatabaseMissing` found `wamid.CONF2` |
 | `if ($in->direction !== WaMessage::IN)` → `if (false)` | `test_an_outbound_row_is_never_a_keyword_hit` (new) | `Failed asserting that true is false.` |
 | `if (!$wasSilenced && $text !== '')` → drop `$text !== ''` | `test_an_unconfigured_opt_out_text_suppresses_without_sending` (new) | `Failed asserting that 2 is identical to 1.` |
@@ -3849,10 +3990,58 @@ confirmation is a courtesy we must not turn into an empty-body send to Meta.
 
 One guard is **inert here by construction, reported rather than artificially tested**:
 `if ($contact->isOptedOut()) { return; }` at the end of `handle()` has no effect in Task 7, because nothing
-follows it, so neutering it leaves all 7 tests green. It is the seam Task 8 writes into (its Step 3 replaces
+follows it, so neutering it leaves all 8 opt-out tests and the whole 124-test suite green (re-measured in the R45 round). It is the seam Task 8 writes into (its Step 3 replaces
 that statement with the acknowledgement rule), and Task 8's `test_opt_out_message_is_not_acknowledged` is its
 witness. A guard whose effect has not been written yet is a scaffold, not dead code; the rule is that the
 controller says so in the ledger instead of manufacturing a passing test for it.
+
+**R45 -- the matcher is tiered, and a non-ASCII space does not hide a keyword.** Reviewer findings F-1
+and F-2 found a contradiction inside spec §9 as written: its algorithm ("split on whitespace; if *any word*
+belongs to the fixed set") can never match that set's own two-word entry `opt out`, because no word
+contains a space. Measured against the matcher as the spec dictated, `"I want to opt out now"` → no,
+`"please opt out"` → no, `"opt out"` → HIT, while `"please opt-out now"` → HIT. That asymmetry misses
+opt-outs in exactly the direction this task calls unrecoverable. The same word-by-word scan silenced clients
+over ordinary English: `"end of month pricing"` → HIT, `"does the fiscal year end in december"` → HIT.
+Put to the account owner as a compliance-facing fork, the answer was "phrases + tiered strictness":
+
+| tier | entries | rule |
+| --- | --- | --- |
+| word, anywhere in the first line | `stop`, `cancel`, `unsubscribe`, `opt-out`, `optout`, `quit` | some word equals it |
+| phrase, anywhere in the first line | `opt out` | consecutive words equal the pair, in order |
+| whole message only | `end`, `remove` | the line is that word and nothing else |
+| button | `button_id` = `stop` | unchanged (R39) |
+
+`opt out` is therefore a `PHRASES` entry held as an array of words and matched as a run by
+`containsSequence()`, never as a string -- which is what keeps whole-word discipline intact: `"xopt outx"`
+cannot fire because its words are `"xopt"` and `"outx"`. "cancel my filing" suppresses; that is the accepted
+cost of keeping an unambiguous STOP-family verb in the anywhere tier.
+
+F-4 folded into the same edit: `preg_split('/\s+/', ...)` is ASCII-only and iOS autocorrect emits U+00A0.
+Before: `"\u{00A0}stop"` → no, `"stop\u{00A0}sending"` → no, `"opt\u{00A0}out"` → no. The `u` modifier makes
+`\s` Unicode-aware in PHP's PCRE (verified directly: `preg_split('/\s+/u', "\u{00A0}stop\u{2009}sending")` →
+`['', 'stop', 'sending']`; the same pattern without `u` → one glued token). One character moves three more
+shapes out of "missed opt-out". **Not adopted:** a zero-width joiner *inside* a word (`"zo\u{200D}pt out"`)
+still does not match -- deleting a client's characters to manufacture a keyword is a different act from
+treating a space as a space. Recorded as a known limit.
+
+Witnesses and mutations, all re-run on these files with `landed=` proof and restore verified byte-identical:
+
+| mutation | observed failure |
+| --- | --- |
+| K1 word tier → `foreach ([]) as $word` | 13 of 43 unit rows |
+| K2 phrase tier → `foreach ([]) as $phrase` | 8 rows |
+| K3 whole-message tier → matches at any position | 2 rows (`test_ambiguous_words_do_not_fire_mid_sentence`) |
+| K4 whole-message tier → `return false` | 4 rows |
+| K5 `/\s+/u` → `/\s+/` | 1 row (`test_unicode_spaces_do_not_hide_the_keyword`) |
+| G1 `$wasSilenced = $contact->isOptedOut()` → global read | 1 of 8 feature tests -- `test_the_one_time_rule_is_per_contact_not_global` |
+
+F-3 close-out: the reviewer asked to defer the second-contact test to Task 8. It landed here instead,
+because the guard it pins ships here -- and G1 is the proof that it is the *only* test which notices a
+hypothetical global "already confirmed once" flag (with the per-contact read replaced by
+`WaContact::whereNotNull('opted_out_at')->exists()`, 7 of 8 stay green).
+
+Counts after this round: unit 43 passed (62 assertions), `OptOutFlowTest` 8 passed (21 assertions), full
+suite **124 passed (323 assertions)**.
 
 - [ ] **Step 8: Wire the job to the responder.** In `app/Jobs/ProcessInboundEvent.php`, replace the line `// Task 7 adds the automatic-response call here.` with:
 
@@ -3868,8 +4057,8 @@ and add `use App\Services\AutoResponder;` to the imports. `$row` is the message 
 php artisan test tests/Feature/OptOutFlowTest.php
 ```
 
-Expected: 7 passed (16 assertions) -- the 5 opt-out flows plus the 2 R42 witnesses. Full suite at this
-step: 108 passed (287 assertions).
+Expected: 8 passed (21 assertions) -- the 5 opt-out flows, the 2 R42 witnesses, and the R45/F-3
+per-contact test. Full suite at this step: 124 passed (323 assertions).
 
 - [ ] **Step 10: Commit**
 
@@ -5133,6 +5322,20 @@ Expected: all green. Fix any regression in this task rather than leaving it for 
 git add app/Http/Controllers/InboxController.php resources/views/inbox/thread.blade.php routes/web.php tests/Feature/InboxActionsTest.php
 git commit -m "feat: staff reply, template send and manual opt-out"
 ```
+
+**Open for Task 12, carried from the Task 7 review.** Spec §Risk table, lines 242-243, says an
+in-flight send to a contact who opted out "is refused at the gate in `WhatsAppSender`, which re-reads
+`opted_out_at` in the same transaction that writes the row." The shipped `WhatsAppSender` has no such read
+(verified in this worktree: a grep for `opted_out` and `isOptedOut` in `app/Services/WhatsAppSender.php`
+returns nothing), and this task's Step 3 puts the check in `InboxController` instead, outside any
+transaction. One of the two is the design: either move the gate into the sender, so every caller -- Task 13's
+importer, Task 15's bench, a future cron -- inherits it, or amend the spec sentence to say where the gate
+actually lives. Decide it here rather than leaving a second, divergent opinion about suppression enforcement
+between the two documents; that is the same mistake R28, R34 and R39 were written against. The TOCTOU half of
+the spec sentence is real but cheap: read `opted_out_at` after the row is locked, or accept the race and say
+so in the ledger.
+
+---
 
 ## Task 13: Import the existing send log
 

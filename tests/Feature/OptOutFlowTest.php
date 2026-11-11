@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Jobs\ProcessInboundEvent;
 use App\Models\WaContact;
 use App\Models\WaMessage;
+use App\Services\AutoResponder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
@@ -100,6 +101,34 @@ class OptOutFlowTest extends TestCase
         $this->assertTrue(WaContact::where('phone', '18479043315')->firstOrFail()->isOptedOut());
         $this->assertSame(WaMessage::FAILED,
             WaMessage::where('direction', WaMessage::OUT)->firstOrFail()->status);
+    }
+
+    public function test_an_outbound_row_is_never_a_keyword_hit()
+    {
+        // R42: this guard is the responder's own contract, not the caller's. An outbound echo whose
+        // body happens to read "STOP" must not silence the client that never said it -- and the
+        // sender is exactly the thing that would then be asked to confirm the opt-out.
+        $c = WaContact::factory()->create(['phone' => '18479043315']);
+        $out = WaMessage::record([
+            'wa_contact_id' => $c->id, 'meta_id' => 'wamid.OUTS1', 'direction' => WaMessage::OUT,
+            'type' => 'text', 'body' => 'STOP', 'status' => WaMessage::SENT, 'sent_at' => now(),
+        ]);
+
+        app(AutoResponder::class)->handle($out, null);
+
+        $this->assertFalse($c->fresh()->isOptedOut());
+        $this->assertSame(1, WaMessage::count(), 'the echo is the only row; nothing was confirmed');
+    }
+
+    public function test_an_unconfigured_opt_out_text_suppresses_without_sending()
+    {
+        // R42: WA_OPT_OUT_TEXT is env()-sourced and defaults to ''. Suppression is the promise; the
+        // confirmation is a courtesy we must not make by sending an empty body to Meta.
+        config(['whatsapp.opt_out_text' => '']);
+        ProcessInboundEvent::dispatchSync($this->inbound('STOP'));
+
+        $this->assertTrue(WaContact::where('phone', '18479043315')->firstOrFail()->isOptedOut());
+        $this->assertSame(1, WaMessage::count(), 'the inbound STOP only -- no empty confirmation');
     }
 
     public function test_quick_reply_button_id_stops()

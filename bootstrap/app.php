@@ -17,6 +17,7 @@ return Application::configure(basePath: dirname(__DIR__))
         ]);
         $middleware->redirectGuestsTo(fn () => '/login');
         $middleware->redirectUsersTo('/inbox');
+        $middleware->alias(['wa.bearer' => \App\Http\Middleware\VerifyWaBearer::class]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //

@@ -5416,7 +5416,7 @@ files, byte for byte.
 **Deliverable:** the bench can fetch who has opted out and can report what it sent, both behind a bearer token that fails closed when the token is not configured.
 
 **Consumes:** `WaContact`, `WaMessage`, `config('whatsapp.export_token')`.
-**Produces:** `GET /wa/suppressions` → `text/plain`, one opted-out E.164 number per line, ascending, no trailing blank; `POST /inbound/record-send` → `201` with `{"recorded":true,"contact_id":N}`; middleware alias `wa.bearer`; `App\Http\Middleware\VerifyWaBearer`.
+**Produces:** `GET /wa/suppressions` → `text/plain`, one opted-out E.164 number per line, ascending **bytewise** (a `varchar` `ORDER BY`, so lexicographic over the digit string -- see R51 §5), no trailing blank; `POST /inbound/record-send` → `201` with `{"recorded":true,"contact_id":N}`; middleware alias `wa.bearer`; `App\Http\Middleware\VerifyWaBearer`.
 
 - [ ] **Step 1: Write the failing test** — `tests/Feature/MachineEndpointTest.php`
 
@@ -5428,6 +5428,7 @@ namespace Tests\Feature;
 use App\Models\WaContact;
 use App\Models\WaMessage;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class MachineEndpointTest extends TestCase
@@ -5517,6 +5518,261 @@ class MachineEndpointTest extends TestCase
         ], $this->bearer())->assertCreated();
         $this->assertTrue(WaContact::where('phone', '18479043315')->first()->isOptedOut());
     }
+
+    public function test_both_bodies_are_exactly_what_the_deliverable_promises()
+    {
+        // N1. The plan's first row trims the body, so it cannot see a trailing newline; the Produces line
+        // promises a two-key 201 body, so nothing else may ride along in it. The opt-outs are inserted in
+        // descending phone order on purpose, so this row also depends on the sort rather than on insertion.
+        WaContact::factory()->create(['phone' => '18479043315'])->optOut('inbound_keyword');
+        WaContact::factory()->create(['phone' => '15550009999'])->optOut('manual');
+
+        $list = $this->getJson('/wa/suppressions', $this->bearer());
+        $this->assertSame("15550009999\n18479043315", $list->getContent());
+
+        $send = $this->postJson('/inbound/record-send', [
+            'to' => '18479043315', 'template' => 'etp_opener_brand', 'language' => 'en',
+            'message_id' => 'wamid.BENCH_N1', 'utc_time' => '2026-11-06T10:00:00Z',
+        ], $this->bearer());
+
+        $this->assertSame(201, $send->getStatusCode());
+        $this->assertSame(['recorded' => true, 'contact_id' => WaContact::where('phone', '18479043315')->value('id')],
+            $send->json());
+    }
+
+    public function test_suppressions_answers_with_an_empty_body_before_anyone_opts_out()
+    {
+        // N2. The bench's first call in a fresh database: 200 and zero bytes, not 204, not '0', not "\n".
+        $res = $this->getJson('/wa/suppressions', $this->bearer());
+
+        $res->assertOk();
+        $this->assertSame('', $res->getContent());
+    }
+
+    public function test_a_bearer_that_only_compares_equal_to_the_token_is_refused()
+    {
+        // N3. The only row that tells hash_equals() from ==: both of these are numeric strings that ==
+        // treats as equal (0e1234567 == 0e9876543 is PHP's magic-hash comparison), so the loose operator
+        // would open the endpoint while every other bearer row still passes.
+        config(['whatsapp.export_token' => '0e1234567']);
+
+        $this->getJson('/wa/suppressions', $this->bearer('0e9876543'))->assertUnauthorized();
+    }
+
+    public static function requiredFieldProvider(): array
+    {
+        return [
+            ['to'],
+            ['template'],
+            ['language'],
+            ['message_id'],
+        ];
+    }
+
+    #[DataProvider('requiredFieldProvider')]
+    public function test_record_send_refuses_a_body_that_drops_one_required_field(string $field): void
+    {
+        // N4. One row per required rule, so a required: that quietly becomes nullable: shows up on its own.
+        $body = ['to' => '18479043315', 'template' => 'etp_welcome_a', 'language' => 'en_US',
+                 'message_id' => 'wamid.BENCH_N4', 'utc_time' => '2026-11-06T10:00:00Z'];
+        unset($body[$field]);
+
+        $this->postJson('/inbound/record-send', $body, $this->bearer())->assertStatus(422);
+        $this->assertSame(0, WaMessage::count());
+    }
+
+    public static function oversizedFieldProvider(): array
+    {
+        return [
+            // The 'to' value is 21 characters but only 11 of them are digits, so the only thing standing
+            // between it and the phone column is max:20 -- the digit guard would let 11 digits through.
+            ['to', str_repeat('+', 10) . '18479043315'],
+            ['template', str_repeat('t', 121)],
+            ['language', str_repeat('e', 11)],
+            ['message_id', str_repeat('w', 129)],
+        ];
+    }
+
+    #[DataProvider('oversizedFieldProvider')]
+    public function test_record_send_refuses_a_field_over_its_length_ceiling(string $field, string $value): void
+    {
+        // N5. Without these the max: rules are decoration and an over-wide value reaches a width-limited
+        // column (language 10, meta_id 128, phone 20).
+        $body = ['to' => '18479043315', 'template' => 'etp_welcome_a', 'language' => 'en_US',
+                 'message_id' => 'wamid.BENCH_N5', 'utc_time' => '2026-11-06T10:00:00Z'];
+        $body[$field] = $value;
+
+        $this->postJson('/inbound/record-send', $body, $this->bearer())->assertStatus(422);
+        $this->assertSame(0, WaMessage::count());
+        $this->assertSame(0, WaContact::count());
+    }
+
+    public function test_record_send_stamps_now_when_the_body_has_no_utc_time()
+    {
+        // N6. The other side of the ternary: sender_server.py always sends utc_time, so this fallback is
+        // only ever exercised by a caller that does not. Within a minute, not equal to now().
+        $this->postJson('/inbound/record-send', [
+            'to' => '18479043315', 'template' => 'etp_welcome_a', 'language' => 'en_US',
+            'message_id' => 'wamid.BENCH_N6',
+        ], $this->bearer())->assertCreated();
+
+        $sentAt = WaMessage::where('meta_id', 'wamid.BENCH_N6')->firstOrFail()->sent_at;
+
+        $this->assertNotNull($sentAt);
+        $this->assertTrue($sentAt->between(now()->subMinute(), now()->addMinute()));
+    }
+
+    public function test_record_send_ignores_a_utc_time_that_is_not_the_bench_format()
+    {
+        // N7. hasFormat() is the guard: drop it and Carbon::parse('not-a-date') throws, which M-B measured
+        // as a rendered 500. A garbage timestamp is not a reason to lose the send record.
+        $this->postJson('/inbound/record-send', [
+            'to' => '18479043315', 'template' => 'etp_welcome_a', 'language' => 'en_US',
+            'message_id' => 'wamid.BENCH_N7', 'utc_time' => 'not-a-date',
+        ], $this->bearer())->assertCreated();
+
+        $sentAt = WaMessage::where('meta_id', 'wamid.BENCH_N7')->firstOrFail()->sent_at;
+
+        $this->assertNotNull($sentAt);
+        $this->assertTrue($sentAt->between(now()->subMinute(), now()->addMinute()));
+    }
+
+    public function test_a_nested_array_utc_time_is_a_422_not_a_crash()
+    {
+        // N8. Same shape as AuthTest's nested-array password row. This is what makes 'string' in the
+        // utc_time rule load-bearing: hasFormat()'s first parameter is typed string, so an array is a
+        // TypeError and M-B measured a TypeError as a rendered 500.
+        $this->postJson('/inbound/record-send', [
+            'to' => '18479043315', 'template' => 'etp_welcome_a', 'language' => 'en_US',
+            'message_id' => 'wamid.BENCH_N8', 'utc_time' => ['nested'],
+        ], $this->bearer())->assertStatus(422);
+
+        $this->assertSame(0, WaMessage::count());
+    }
+
+    public function test_record_send_refuses_a_to_that_survives_validation_without_any_digits()
+    {
+        // N9. D3, gated on M-B: ten characters is enough for min:10 and zero digits is enough to make
+        // fromPhone() throw, so the controller rejects it as a validation failure instead of a 500.
+        $this->postJson('/inbound/record-send', [
+            'to' => 'aaaaaaaaaa', 'template' => 'etp_welcome_a', 'language' => 'en_US',
+            'message_id' => 'wamid.BENCH_N9', 'utc_time' => '2026-11-06T10:00:00Z',
+        ], $this->bearer())->assertStatus(422);
+
+        $this->assertSame(0, WaMessage::count());
+        $this->assertSame(0, WaContact::count());
+    }
+
+    public static function machineCallProvider(): array
+    {
+        return [
+            ['get', '/wa/suppressions', []],
+            ['post', '/inbound/record-send', [
+                'to' => '18479043315', 'template' => 'etp_opener_brand', 'language' => 'en',
+                'message_id' => 'wamid.BENCH_N10', 'utc_time' => '2026-11-06T10:00:00Z',
+            ]],
+        ];
+    }
+
+    #[DataProvider('machineCallProvider')]
+    public function test_a_machine_call_answers_successfully_and_sets_no_cookie(string $verb, string $uri, array $body): void
+    {
+        // N10. M-A's residue. Both CSRF exemptions on this POST (the route's ->withoutMiddleware('web')
+        // and the 'inbound/record-send' entry in bootstrap/app.php) answer 201 with no token, so the status
+        // code cannot tell them apart; what only the route exclusion can do is keep the web group out of
+        // the pipeline, and StartSession and VerifyCsrfToken both show up as Set-Cookie headers when it runs.
+        // SESSION_DRIVER is array in tests, so a cookie is the whole of what is observable here.
+        $res = $verb === 'get' ? $this->getJson($uri, $this->bearer()) : $this->postJson($uri, $body, $this->bearer());
+
+        $this->assertTrue($res->isSuccessful(), $verb . ' ' . $uri . ' answered ' . $res->getStatusCode());
+        $this->assertSame([], $res->headers->getCookies());
+    }
+
+    public function test_the_record_send_post_refuses_missing_and_wrong_bearers(): void
+    {
+        // W1. The POST's bearer guard was only ever witnessed as the half of an unrelated row (the unconfigured
+        // token row), so moving ->middleware('wa.bearer') off the group onto the GET alone left the whole suite
+        // green except that half-row. This is the negative-bearer row for the write endpoint on its own.
+        $body = ['to' => '18479043315', 'template' => 'etp_opener_brand', 'language' => 'en',
+                 'message_id' => 'wamid.BENCH_W1', 'utc_time' => '2026-11-06T10:00:00Z'];
+
+        $this->postJson('/inbound/record-send', $body)->assertUnauthorized();
+        $this->postJson('/inbound/record-send', $body, $this->bearer('nope'))->assertUnauthorized();
+        $this->assertSame(0, WaMessage::count());
+    }
+
+    public function test_the_two_route_names_the_fence_promises_exist(): void
+    {
+        // W2. Task 9 parity (AuthTest's route-name row): the fence ships both names and nothing read them.
+        // Asserted through Route::has(), never through a generated URL, because a name asserted against a URL
+        // passes for the wrong reason under a different APP_URL.
+        $this->assertTrue(\Illuminate\Support\Facades\Route::has('wa.suppressions'));
+        $this->assertTrue(\Illuminate\Support\Facades\Route::has('wa.record_send'));
+    }
+
+    public function test_a_non_string_to_is_422_not_a_crash(): void
+    {
+        // W3. min:10 and max:20 count ARRAY ELEMENTS (ValidatesAttributes::getSize() returns count() for arrays),
+        // so a value must have 10..20 elements to slip past them and reach WaContact::digitsOnly(?string) as an
+        // array. A 1-element array is 422 under the mutation too, because min:10 refuses it -- that would be a
+        // false witness. This is what makes 'string' in the to rule load-bearing.
+        $this->postJson('/inbound/record-send', [
+            'to' => array_fill(0, 12, '18479043315'), 'template' => 'etp_opener_brand', 'language' => 'en',
+            'message_id' => 'wamid.BENCH_W3',
+        ], $this->bearer())->assertStatus(422);
+
+        $this->assertSame(0, WaMessage::count());
+        $this->assertSame(0, WaContact::count());
+    }
+
+    public static function nonStringFieldProvider(): array
+    {
+        return [['template', ['x']], ['language', ['en']], ['message_id', ['w']]];
+    }
+
+    #[DataProvider('nonStringFieldProvider')]
+    public function test_a_non_string_field_is_422_not_a_crash(string $field, array $value): void
+    {
+        // W4. Same class as W3 for the other three 'string' rules. No min:/max: length rule on these fields
+        // counts elements the way min:10 does on to, so a one-element array already reaches the DB binding.
+        $body = ['to' => '18479043315', 'template' => 'etp_welcome_a', 'language' => 'en_US',
+                 'message_id' => 'wamid.BENCH_W4', 'utc_time' => '2026-11-06T10:00:00Z'];
+        $body[$field] = $value;
+
+        $this->postJson('/inbound/record-send', $body, $this->bearer())->assertStatus(422);
+        $this->assertSame(0, WaMessage::count());
+    }
+
+    public function test_a_null_utc_time_is_accepted_and_stamps_now(): void
+    {
+        // W5. isset() skips a key that is present but null; array_key_exists() does not, and would feed null to
+        // Carbon::hasFormat(string $date) and turn a legal utc_time: null into a 500. N6 only omits the key, which
+        // both spellings handle identically, so this is the corner that tells them apart.
+        $this->postJson('/inbound/record-send', [
+            'to' => '18479043315', 'template' => 'etp_welcome_a', 'language' => 'en_US',
+            'message_id' => 'wamid.BENCH_W5', 'utc_time' => null,
+        ], $this->bearer())->assertCreated();
+
+        $m = WaMessage::where('meta_id', 'wamid.BENCH_W5')->firstOrFail();
+
+        $this->assertTrue($m->sent_at->between(now()->subMinute(), now()->addMinute()));
+    }
+
+    public function test_the_bench_record_carries_its_type_and_source(): void
+    {
+        // W6. The type column defaults to 'text', so dropping 'type' => 'template' writes a silently wrong row,
+        // and raw.source is the only provenance marker on a bench send. Task 13/16 inbox queries read the type
+        // column, so this is the guard that matters there.
+        $this->postJson('/inbound/record-send', [
+            'to' => '18479043315', 'template' => 'etp_opener_brand', 'language' => 'en',
+            'message_id' => 'wamid.BENCH_W6', 'utc_time' => '2026-11-06T10:00:00Z',
+        ], $this->bearer())->assertCreated();
+
+        $m = WaMessage::where('meta_id', 'wamid.BENCH_W6')->firstOrFail();
+
+        $this->assertSame('template', $m->type);
+        $this->assertSame(['source' => 'send_bench'], $m->raw);
+    }
 }
 ```
 
@@ -5558,7 +5814,7 @@ namespace App\Http\Controllers;
 use App\Models\WaContact;
 use App\Models\WaMessage;
 use Illuminate\Http\Request;
-use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class MachineController extends Controller
 {
@@ -5582,12 +5838,23 @@ class MachineController extends Controller
             'utc_time' => ['nullable', 'string'],
         ]);
 
+        // Validation measures the raw string, isDialable() measures the digits after the strip, so a ten
+        // character "to" with no digits in it survives validate() and lands in fromPhone(), which throws.
+        // Measured: an uncaught InvalidArgumentException renders a 500 here, so the bench gets a server
+        // error for a body it could fix. Reject it as a 422 through WaContact's own predicate instead --
+        // one definition of "dialable", no duplicated length literals.
+        if (!WaContact::isDialable(WaContact::digitsOnly($data['to']))) {
+            throw ValidationException::withMessages([
+                'to' => 'The to field must contain a dialable phone number.',
+            ]);
+        }
+
         $contact = WaContact::fromPhone($data['to']);
         $sentAt = isset($data['utc_time']) && \Illuminate\Support\Carbon::hasFormat($data['utc_time'], 'Y-m-d\TH:i:s\Z')
             ? \Illuminate\Support\Carbon::parse($data['utc_time'], 'UTC')
             : now();
 
-        $message = WaMessage::record([
+        WaMessage::record([
             'wa_contact_id' => $contact->id,
             'meta_id' => $data['message_id'],
             'direction' => WaMessage::OUT,
@@ -5600,8 +5867,7 @@ class MachineController extends Controller
             'raw' => ['source' => 'send_bench'],
         ]);
 
-        return response()->json(['recorded' => true, 'contact_id' => $contact->id,
-                                 'message_id' => $message->id], 201);
+        return response()->json(['recorded' => true, 'contact_id' => $contact->id], 201);
     }
 }
 ```
@@ -5638,7 +5904,9 @@ Note `recordSend` never touches `opted_out_at`, which is what the suppression-pr
 php artisan test tests/Feature/MachineEndpointTest.php
 ```
 
-Expected: 8 passed.
+Expected: 33 passed (80 assertions) -- 25 rows as the brief shipped them, plus the 6 methods (8 rows, one of
+them a 3-case provider) that the independent review added under R51 below. Whole suite at this point:
+**228 passed (525 assertions)**.
 
 - [ ] **Step 7: Commit**
 
@@ -5646,6 +5914,99 @@ Expected: 8 passed.
 git add app routes/web.php bootstrap/app.php tests/Feature/MachineEndpointTest.php
 git commit -m "feat: bearer-guarded suppression list and bench send records"
 ```
+
+---
+
+**R51 -- the implementer called five arms green and was right about four; the review's sixth finding was a guard
+the *brief* had promised would fail and did not, and six more shipped with no witness at all.**
+
+Task 10 ran the full cycle: implementer (31 arms, 5 green) -> independent adversarial reviewer (49 runs, 35 arms
+of its own, 15 more green) -> fix round (6 methods / 8 rows, each killed against its named arm before shipping).
+The five Step fences above are now the shipped files, byte for byte.
+
+**The four pre-authorised deviations, and the two measurements that gated them.**
+
+- **D1** -- `use Illuminate\Validation\Rule;` deleted from the Step 4 fence: unused, sole occurrence.
+- **D2** -- `message_id` dropped from the 201 body. The plan's fence returned a third key whose name collides with
+  the *request* field `message_id` (a `wamid` string) while holding an integer primary key, and the Produces line
+  promised two keys. N1 now asserts the body is *exactly* `{recorded, contact_id}`, so a silently re-added key dies.
+- **D3** -- landed, gated on **M-B**. `to = 'aaaaaaaaaa'` passes `min:10,max:20` (those measure the raw string) and
+  reaches `fromPhone()`, which throws. Measured on the un-deviated fence state: **500**
+  (`InvalidArgumentException: not an E.164 number: aaaaaaaaaa`), 0 rows written, **and the probe test method itself
+  did not fail** -- Laravel renders the exception into the response, so a 500 is invisible to PHPUnit unless a row
+  asserts the status. That is the general trap for this app: an unwitnessed crash looks like a passing run.
+  The controller now rejects with `ValidationException::withMessages(['to' => ...])` computed through
+  `WaContact::isDialable(WaContact::digitsOnly(...))`, and the same request is **422**.
+- **D4** -- resolved by **M-A**, and the deviation is "no row for the CSRF status". Five states, `env` flipped to
+  `production`, valid bearer, no `_token`: shipped **201 / no cookies**; `withoutMiddleware('web')` off the POST
+  **201 / XSRF-TOKEN + laravel-session**; that *and* the `except` entry gone **419 / nothing written**; `except`
+  entry gone alone **201 / no cookies** (identical to shipped). So the status code cannot attribute either
+  exemption; the only distinguishing observable is `Set-Cookie`, which is exactly "did the web group run", and
+  that is what N10 asserts.
+
+**The vendor fact that settles the `except` entry.** `Route::withoutMiddleware()` appends to `excluded_middleware`
+(`Route.php:1173`) and `Router::resolveMiddleware()` maps an excluded *group alias* through
+`MiddlewareNameResolver::resolve()`, which returns the group's concrete members (`MiddlewareNameResolver.php:35-37,
+57-90`; web members at `Foundation/Configuration/Middleware.php:485-493`). So `withoutMiddleware('web')` removes
+`VerifyCsrfToken`, `EncryptCookies` **and** `StartSession` from that route's pipeline, and it is a route property
+that never reads `env` -- which is why M-A's S4 changes nothing in *any* environment. The Task 1 `except` entry is
+therefore dead config as shipped and the only thing standing between a regressed route and a 419 in production;
+**kept**, as a tripwire, with its status written here instead of a row that would pass for the wrong reason.
+
+**The arms that were green as shipped, and what R51 did about each.**
+
+| arm | mutation (`occurrences=1`, `landed=true`) | as shipped | witness after R51 |
+| --- | --- | --- | --- |
+| X21 | `wa.bearer` moved from the group onto the GET only | 1 failed, 219 | the surviving death was `test_unconfigured_export_token_refuses_everything`'s POST half, replying **422** -- the POST's guard was only ever half a row. Now **W1** `test_the_record_send_post_refuses_missing_and_wrong_bearers` |
+| X23 / X24 | each `->name(...)` deleted | green 220 | **W2** `test_the_two_route_names_the_fence_promises_exist`, through `Route::has()` and never a generated URL (the Task 9 lesson: a name asserted against a URL passes for the wrong reason under another `APP_URL`) |
+| X07 | `'string'` dropped from the `to` rule | green 220 | **W3** `test_a_non_string_to_is_422_not_a_crash`. The implementer's C20 claim ("unwitnessable") is refuted: `ValidatesAttributes::getSize()` returns `count($value)` for arrays (`:2764-2781`), so `min:10`/`max:20` count **elements** and a 10..20-element array reaches `digitsOnly(?string)` as a `TypeError` -> 500. The reviewer's refinement to the brief's own reasoning: a 1-element array is 422 under the mutation too, so it would have been a false witness. |
+| X09-X11 | `'string'` dropped from `template` / `language` / `message_id` | green 220 | **W4** `test_a_non_string_field_is_422_not_a_crash`, a 3-case `#[DataProvider]` (no `min:`/`max:` stands in front of the DB binding here, so one element suffices) |
+| X14 | `isset($data['utc_time'])` -> `array_key_exists(...)` | green 220 | **W5** `test_a_null_utc_time_is_accepted_and_stamps_now`. `isset()` skips a present-but-null key; `array_key_exists()` does not, and would feed `null` to `Carbon::hasFormat(string)` (`Comparison.php:1187`) -- a legal `utc_time: null` becoming a 500. The plan's N6 omits the key, which both spellings handle identically. |
+| X12 / X13 | `'type' => 'template'` deleted / `raw.source` rewritten | green 220 | **W6** `test_the_bench_record_carries_its_type_and_source`. The column default is `'text'`, so the deletion writes a silently wrong row, and Tasks 11/13 read the `type` column. |
+| X01 | **both** `$expected === ''` and `$given === ''` deleted, only `hash_equals` left | 1 failed, 219 | the brief predicted the single deletions would fail that row; measured **green** (X01a, X01b). Deleting both fails it at the GET, which answers **200** because the row sends `bearer('')` -> `Request::bearerToken()` is `''` and `hash_equals('', '')` is **true**. So: individually redundant, jointly load-bearing, **jointly witnessed** -- the report's §6.1 said "`hash_equals()` already refuses the unconfigured state", which is false for the only bearer that row sends. Same shape as Task 9's `redirectGuestsTo`/`name('login')` pair, one step better: this pair dies on plain deletion. |
+| X04 | `(string)` cast dropped from `$given` | 1 failed, 219 | already witnessed by `test_missing_bearer_is_401`, which receives a **500** (`hash_equals(): Argument #2 must be of type string, null given`). Recorded because nobody chose that cast consciously: with the header absent `bearerToken()` is `null`, not `''`. |
+
+**Recorded, deliberately not changed, and not written up as rows because a row would pass for the wrong reason:**
+
+- **`hash_equals` vs strict `!==` (X03) is un-witnessable in-process.** Deleting `$expected !== $given` for
+  `hash_equals` leaves the suite green, and no feature row can separate a constant-time compare from a
+  non-constant one; that would need a timing benchmark, which the house rules forbid. N3 already pins the `==`
+  failure mode (type juggling), which is the realistic bug. Written report instead.
+- **`min:10` on `to` (X08) cannot change an outcome.** `digitsOnly()` can only shrink, so fewer than 10 characters
+  can never yield 10..20 digits, and the D3 guard 422s exactly what `min:10` 422s. The two are status-equivalent and
+  differ only in the error copy. Kept (zero cost, narrows the D3 surface); a message-pinning row was rejected as
+  copy-fragile. The report's §6.4 had the order backwards -- `validate()` runs *first*; the guard is what runs after.
+- **`(string)` on `$expected` (X05) and the 401 body copy `'unauthorized'` (X06)** -- inert config cast, and copy
+  with no behaviour behind it (Task 9's V4 family). Recorded.
+- **Alias vs inline class for the middleware (X22) is unpinned**; the *presence* of the alias is witnessed jointly
+  by X30 (deleting it fails all 25 rows and drops the suite to exactly 195/445). Nothing pins which spelling
+  `routes/web.php` uses; accepted.
+- **"Ascending" means bytewise.** `orderBy('phone')` over a `varchar` is lexicographic, so `10000000000` lists
+  *before* `9999999999` (measured). No shipped writer can put a non-digit into `wa_contacts.phone` -- every path goes
+  through `fromPhone()` -> `digitsOnly()` + `isDialable()`. Harmless for a set-diff consumer, and MariaDB's
+  `utf8mb4_*_ci` agrees with sqlite's BINARY for pure digits, so no cross-driver drift. The Produces line now says
+  so. Only worth a code change if the bench ever diffs by position.
+- **A replaying bench splits two columns on one row.** Same `meta_id`, second `utc_time` `2027-01-02T03:04:05Z`:
+  rows stay **1** (dedupe is honest) but `sent_at` is rewritten while `status_at` keeps the first send, because
+  `WaMessage::record()` unsets `status`/`status_at` on a same-rank replay and leaves `sent_at` in the update set.
+  The plan's replay row posts the same body twice and cannot see it. **Recorded for Task 13, not pinned** -- the
+  only green row available today would certify the wart as the contract on the page a reader expects the promise,
+  and fixing `record()` is out of scope (Task 5 closed). Task 13's import decides.
+- **Harness discipline from the fix round:** a first attempt at the X21 arm was written as
+  `Route::group(function () { ... })`, which is not valid Laravel API (`Router::group()` takes an attributes array
+  first) -- every HTTP test in the suite errored (`errors="144"`, no `Tests:` summary) while the name-matching still
+  reported "my row died". Refused and re-run as `Route::group([], ...)`, and two guards added to the harness before
+  any number was kept: a run with no artisan summary is refused, and each row's *reason of death* is printed from
+  the junit failure body rather than inferred from the row name. A second bug went the safe direction: exact-string
+  row matching does not match PHPUnit's `… with data set #0`, so D1 first reported `MY_ROW_KILLED=false` for an arm
+  that did kill it; the matcher was patched and the arm re-run rather than re-interpreted.
+
+Counts after R51: baseline **195 passed (445 assertions)** -> implementer **220 (506)** -> fix round
+**228 passed (525 assertions)**, of which `tests/Feature/MachineEndpointTest.php` is **33 rows / 80 assertions**
+(the plan's 8, the brief's N1-N10 to 25, and R51's 6 methods = 8 rows). Four source files unchanged by the fix
+round (`VerifyWaBearer.php 9b55b56d/497`, `MachineController.php 98fde92c/2474`, `routes/web.php 91241c84/1173`,
+`bootstrap/app.php 14700659/832`); `MachineEndpointTest.php` 12344 -> **17145 bytes, sha8 `c60395e0`**. Task 9's
+five files untouched at `ef12297f` / `0071aae6` / `575da960` / `152be586` / `92989a3f`.
 
 ---
 

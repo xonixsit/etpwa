@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Auth\LoginController;
+use App\Http\Controllers\InboxController;
 use App\Http\Controllers\MachineController;
 use App\Http\Controllers\WaWebhookController;
 use Illuminate\Support\Facades\Route;
@@ -27,4 +28,6 @@ Route::post('/logout', [LoginController::class, 'destroy'])->name('logout');
 
 Route::middleware('auth')->group(function () {
     Route::get('/', fn () => redirect('/inbox'))->name('home');
+    Route::get('/inbox', [InboxController::class, 'contacts'])->name('inbox');
+    Route::get('/inbox/{contact}', [InboxController::class, 'thread'])->name('inbox.thread');
 });

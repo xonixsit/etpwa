@@ -750,7 +750,7 @@ class WebhookSignatureTest extends TestCase
 
     private function good(): string
     {
-        return 'sha256=' . hash_hmac('sha256', $this->body(), self::SECRET);
+        return 'sha256='.hash_hmac('sha256', $this->body(), self::SECRET);
     }
 
     public function test_accepts_a_correct_sha256_header()
@@ -765,13 +765,13 @@ class WebhookSignatureTest extends TestCase
 
     public function test_rejects_wrong_prefix()
     {
-        $sha1 = 'sha1=' . hash_hmac('sha1', $this->body(), self::SECRET);
+        $sha1 = 'sha1='.hash_hmac('sha1', $this->body(), self::SECRET);
         $this->assertFalse(WebhookSignature::isValid($this->body(), $sha1, self::SECRET));
     }
 
     public function test_rejects_tampered_body()
     {
-        $this->assertFalse(WebhookSignature::isValid($this->body() . ' ', $this->good(), self::SECRET));
+        $this->assertFalse(WebhookSignature::isValid($this->body().' ', $this->good(), self::SECRET));
     }
 
     public function test_rejects_empty_secret()
@@ -805,12 +805,12 @@ class WebhookSignature
 {
     public static function isValid(string $rawBody, ?string $header, string $secret): bool
     {
-        if ($secret === '' || $header === null || !str_starts_with($header, 'sha256=')) {
+        if ($secret === '' || $header === null || ! str_starts_with($header, 'sha256=')) {
             return false;
         }
 
         $given = strtolower(substr($header, 7));
-        if (!preg_match('/^[0-9a-f]{64}$/', $given)) {
+        if (! preg_match('/^[0-9a-f]{64}$/', $given)) {
             return false;
         }
 
@@ -3550,7 +3550,6 @@ class OptOutKeywordsTest extends TestCase
      * R45: "opt out" is two words, so the old word-by-word scan could only ever match it as a whole
      * line -- "I want to opt out now" did not suppress, while "please opt-out now" did. A missed
      * opt-out is the unrecoverable direction, so the phrase must match anywhere in the first line.
-     *
      */
     #[DataProvider('phraseProvider')]
     public function test_the_two_word_phrase_matches_anywhere(string $text)
@@ -3571,7 +3570,6 @@ class OptOutKeywordsTest extends TestCase
      * R45: `end` and `remove` are ordinary English in a tax conversation, so they only mean opt-out
      * when they are the entire message. This is the tier that keeps the loose direction honest instead
      * of silencing a client who asked about a deadline.
-     *
      */
     #[DataProvider('ambiguousProvider')]
     public function test_ambiguous_words_do_not_fire_mid_sentence(string $text)
@@ -3608,7 +3606,6 @@ class OptOutKeywordsTest extends TestCase
      * Reviewer F-4: iOS autocorrect and pasted text emit U+00A0 and friends, which an ASCII-only \s and
      * trim() do not see as separators -- so a space can hide the keyword. A hidden keyword is a missed
      * opt-out, the unrecoverable direction, hence the Unicode-aware split.
-     *
      */
     #[DataProvider('unicodeSpaceProvider')]
     public function test_unicode_spaces_do_not_hide_the_keyword(string $text)
@@ -3641,7 +3638,6 @@ class OptOutKeywordsTest extends TestCase
      * unasked, and a trailing "…" is a common way to end a one-word message. A byte-level strip cannot see
      * either, and for `end`/`remove` one stray mark defeats the whole-message tier as well as the word
      * scan, because the token no longer equals the keyword.
-     *
      */
     #[DataProvider('unicodePunctuationProvider')]
     public function test_unicode_punctuation_does_not_hide_the_keyword(string $text)
@@ -4339,7 +4335,7 @@ class AckFlowTest extends TestCase
         // same second. A helper that always stamps now() cannot express that, and now() differs by
         // microseconds between two dispatchSync calls.
         return [
-            'kind' => 'message', 'meta_id' => 'wamid.' . uniqid(), 'phone' => $phone,
+            'kind' => 'message', 'meta_id' => 'wamid.'.uniqid(), 'phone' => $phone,
             'direction' => WaMessage::IN, 'type' => 'text', 'text' => $body,
             'button_id' => null, 'template_name' => null, 'template_lang' => null,
             'sent_at' => $at ?? now(), 'raw' => ['text' => ['body' => $body]],
@@ -4546,7 +4542,7 @@ class AckFlowTest extends TestCase
         // row the sender records for it (WhatsAppSender.php:99), not an escaping exception. This test does
         // NOT prove atomicity -- see R46 for why no test can, with CACHE_STORE=array.
         $contact = WaContact::factory()->create(['phone' => '18479043315']);
-        Cache::add('wa-ack-' . $contact->id, 1, now()->addHours(24));
+        Cache::add('wa-ack-'.$contact->id, 1, now()->addHours(24));
         ProcessInboundEvent::dispatchSync($this->inbound('hello'));
 
         $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
@@ -4784,7 +4780,9 @@ namespace Tests\Feature;
 
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Route;
 use Tests\TestCase;
 
 class AuthTest extends TestCase
@@ -4801,7 +4799,7 @@ class AuthTest extends TestCase
     public function test_correct_credentials_open_a_session_and_send_staff_to_the_inbox()
     {
         User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                 'password' => Hash::make('good-pass-123')]);
+            'password' => Hash::make('good-pass-123')]);
 
         $this->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'good-pass-123'])
             ->assertRedirect('/inbox');
@@ -4812,7 +4810,7 @@ class AuthTest extends TestCase
     public function test_wrong_password_stays_on_the_form()
     {
         User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                 'password' => Hash::make('good-pass-123')]);
+            'password' => Hash::make('good-pass-123')]);
 
         $this->from('/login')->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'nope'])
             ->assertRedirect('/login')
@@ -4861,7 +4859,7 @@ class AuthTest extends TestCase
     public function test_the_sixth_login_attempt_is_refused_by_the_throttle()
     {
         User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                 'password' => Hash::make('good-pass-123')]);
+            'password' => Hash::make('good-pass-123')]);
 
         for ($attempt = 1; $attempt <= 5; $attempt++) {
             $this->from('/login')->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'nope'])
@@ -4877,7 +4875,7 @@ class AuthTest extends TestCase
     {
         $html = $this->get('/login')->getContent();
 
-        $this->assertStringContainsString('name="_token" value="' . session()->token() . '"', $html);
+        $this->assertStringContainsString('name="_token" value="'.session()->token().'"', $html);
     }
 
     public function test_the_login_endpoint_rejects_a_request_with_no_token()
@@ -4886,7 +4884,7 @@ class AuthTest extends TestCase
         $this->app->instance('env', 'production');
 
         User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                 'password' => Hash::make('good-pass-123')]);
+            'password' => Hash::make('good-pass-123')]);
 
         $html = $this->get('/login')->getContent();
         preg_match('/name="_token" value="([^"]+)"/', $html, $match);
@@ -4910,7 +4908,7 @@ class AuthTest extends TestCase
     public function test_a_failed_sign_in_displays_the_credentials_message()
     {
         User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                 'password' => Hash::make('good-pass-123')]);
+            'password' => Hash::make('good-pass-123')]);
 
         $this->from('/login')->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'nope']);
 
@@ -4922,8 +4920,8 @@ class AuthTest extends TestCase
     public function test_stay_signed_in_sets_a_recall_token()
     {
         $user = User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                         'password' => Hash::make('good-pass-123'),
-                                         'remember_token' => null]);
+            'password' => Hash::make('good-pass-123'),
+            'remember_token' => null]);
 
         $this->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'good-pass-123', 'remember' => '1'])
             ->assertRedirect('/inbox');
@@ -4934,8 +4932,8 @@ class AuthTest extends TestCase
     public function test_no_recall_token_is_set_when_stay_signed_in_is_left_unchecked()
     {
         $user = User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                         'password' => Hash::make('good-pass-123'),
-                                         'remember_token' => null]);
+            'password' => Hash::make('good-pass-123'),
+            'remember_token' => null]);
 
         $this->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'good-pass-123'])
             ->assertRedirect('/inbox');
@@ -4945,21 +4943,21 @@ class AuthTest extends TestCase
 
     public function test_the_validate_block_runs_and_the_email_rule_is_the_email_rule()
     {
-        \Illuminate\Support\Facades\DB::enableQueryLog();
+        DB::enableQueryLog();
 
-        \Illuminate\Support\Facades\DB::flushQueryLog();
+        DB::flushQueryLog();
         $this->post('/login', ['email' => 'not-an-email', 'password' => 'anything']);
-        $this->assertSame(0, count(\Illuminate\Support\Facades\DB::getQueryLog()));
+        $this->assertSame(0, count(DB::getQueryLog()));
 
-        \Illuminate\Support\Facades\DB::flushQueryLog();
+        DB::flushQueryLog();
         $this->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'wrong-but-shaped']);
-        $this->assertGreaterThan(0, count(\Illuminate\Support\Facades\DB::getQueryLog()));
+        $this->assertGreaterThan(0, count(DB::getQueryLog()));
     }
 
     public function test_a_missing_password_is_a_redirect_not_a_crash()
     {
         User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                 'password' => Hash::make('good-pass-123')]);
+            'password' => Hash::make('good-pass-123')]);
 
         $this->post('/login', ['email' => 'staff@etaxplanner.com'])
             ->assertStatus(302);
@@ -4969,7 +4967,7 @@ class AuthTest extends TestCase
     public function test_a_nested_array_password_is_a_302_not_a_500()
     {
         User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                 'password' => Hash::make('good-pass-123')]);
+            'password' => Hash::make('good-pass-123')]);
 
         $this->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => ['nested']])
             ->assertStatus(302);
@@ -5030,8 +5028,8 @@ class AuthTest extends TestCase
 
     public function test_the_two_route_names_the_deliverable_promises_exist()
     {
-        $this->assertTrue(\Illuminate\Support\Facades\Route::has('login'));
-        $this->assertTrue(\Illuminate\Support\Facades\Route::has('logout'));
+        $this->assertTrue(Route::has('login'));
+        $this->assertTrue(Route::has('logout'));
     }
 
     public function test_the_throttle_is_on_the_post_only()
@@ -5081,7 +5079,7 @@ class WaCreateUser extends Command
         $user->password = Hash::make($password);
         $user->save();
 
-        $this->info('Staff account ready: ' . $email);
+        $this->info('Staff account ready: '.$email);
 
         return 0;
     }
@@ -5095,10 +5093,10 @@ class WaCreateUser extends Command
 
 namespace App\Http\Controllers\Auth;
 
+use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\ValidationException;
-use App\Http\Controllers\Controller;
 
 class LoginController extends Controller
 {
@@ -5114,7 +5112,7 @@ class LoginController extends Controller
             'password' => ['required', 'string'],
         ]);
 
-        if (!Auth::attempt($credentials, $request->boolean('remember'))) {
+        if (! Auth::attempt($credentials, $request->boolean('remember'))) {
             throw ValidationException::withMessages([
                 'email' => 'Those credentials do not match our records.',
             ]);
@@ -5428,6 +5426,7 @@ namespace Tests\Feature;
 use App\Models\WaContact;
 use App\Models\WaMessage;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Route;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
@@ -5443,7 +5442,7 @@ class MachineEndpointTest extends TestCase
 
     private function bearer(string $token = 'export-test'): array
     {
-        return ['HTTP_AUTHORIZATION' => 'Bearer ' . $token];
+        return ['HTTP_AUTHORIZATION' => 'Bearer '.$token];
     }
 
     public function test_suppressions_lists_only_opted_out_numbers_sorted()
@@ -5495,7 +5494,7 @@ class MachineEndpointTest extends TestCase
     public function test_record_send_replays_do_not_duplicate()
     {
         $body = ['to' => '18479043315', 'template' => 'etp_welcome_c', 'language' => 'en_US',
-                 'message_id' => 'wamid.BENCH2', 'utc_time' => '2026-11-06T10:00:00Z'];
+            'message_id' => 'wamid.BENCH2', 'utc_time' => '2026-11-06T10:00:00Z'];
         $this->postJson('/inbound/record-send', $body, $this->bearer());
         $this->postJson('/inbound/record-send', $body, $this->bearer());
         $this->assertSame(1, WaMessage::count());
@@ -5574,7 +5573,7 @@ class MachineEndpointTest extends TestCase
     {
         // N4. One row per required rule, so a required: that quietly becomes nullable: shows up on its own.
         $body = ['to' => '18479043315', 'template' => 'etp_welcome_a', 'language' => 'en_US',
-                 'message_id' => 'wamid.BENCH_N4', 'utc_time' => '2026-11-06T10:00:00Z'];
+            'message_id' => 'wamid.BENCH_N4', 'utc_time' => '2026-11-06T10:00:00Z'];
         unset($body[$field]);
 
         $this->postJson('/inbound/record-send', $body, $this->bearer())->assertStatus(422);
@@ -5586,7 +5585,7 @@ class MachineEndpointTest extends TestCase
         return [
             // The 'to' value is 21 characters but only 11 of them are digits, so the only thing standing
             // between it and the phone column is max:20 -- the digit guard would let 11 digits through.
-            ['to', str_repeat('+', 10) . '18479043315'],
+            ['to', str_repeat('+', 10).'18479043315'],
             ['template', str_repeat('t', 121)],
             ['language', str_repeat('e', 11)],
             ['message_id', str_repeat('w', 129)],
@@ -5599,7 +5598,7 @@ class MachineEndpointTest extends TestCase
         // N5. Without these the max: rules are decoration and an over-wide value reaches a width-limited
         // column (language 10, meta_id 128, phone 20).
         $body = ['to' => '18479043315', 'template' => 'etp_welcome_a', 'language' => 'en_US',
-                 'message_id' => 'wamid.BENCH_N5', 'utc_time' => '2026-11-06T10:00:00Z'];
+            'message_id' => 'wamid.BENCH_N5', 'utc_time' => '2026-11-06T10:00:00Z'];
         $body[$field] = $value;
 
         $this->postJson('/inbound/record-send', $body, $this->bearer())->assertStatus(422);
@@ -5684,7 +5683,7 @@ class MachineEndpointTest extends TestCase
         // SESSION_DRIVER is array in tests, so a cookie is the whole of what is observable here.
         $res = $verb === 'get' ? $this->getJson($uri, $this->bearer()) : $this->postJson($uri, $body, $this->bearer());
 
-        $this->assertTrue($res->isSuccessful(), $verb . ' ' . $uri . ' answered ' . $res->getStatusCode());
+        $this->assertTrue($res->isSuccessful(), $verb.' '.$uri.' answered '.$res->getStatusCode());
         $this->assertSame([], $res->headers->getCookies());
     }
 
@@ -5694,7 +5693,7 @@ class MachineEndpointTest extends TestCase
         // token row), so moving ->middleware('wa.bearer') off the group onto the GET alone left the whole suite
         // green except that half-row. This is the negative-bearer row for the write endpoint on its own.
         $body = ['to' => '18479043315', 'template' => 'etp_opener_brand', 'language' => 'en',
-                 'message_id' => 'wamid.BENCH_W1', 'utc_time' => '2026-11-06T10:00:00Z'];
+            'message_id' => 'wamid.BENCH_W1', 'utc_time' => '2026-11-06T10:00:00Z'];
 
         $this->postJson('/inbound/record-send', $body)->assertUnauthorized();
         $this->postJson('/inbound/record-send', $body, $this->bearer('nope'))->assertUnauthorized();
@@ -5706,8 +5705,8 @@ class MachineEndpointTest extends TestCase
         // W2. Task 9 parity (AuthTest's route-name row): the fence ships both names and nothing read them.
         // Asserted through Route::has(), never through a generated URL, because a name asserted against a URL
         // passes for the wrong reason under a different APP_URL.
-        $this->assertTrue(\Illuminate\Support\Facades\Route::has('wa.suppressions'));
-        $this->assertTrue(\Illuminate\Support\Facades\Route::has('wa.record_send'));
+        $this->assertTrue(Route::has('wa.suppressions'));
+        $this->assertTrue(Route::has('wa.record_send'));
     }
 
     public function test_a_non_string_to_is_422_not_a_crash(): void
@@ -5736,7 +5735,7 @@ class MachineEndpointTest extends TestCase
         // W4. Same class as W3 for the other three 'string' rules. No min:/max: length rule on these fields
         // counts elements the way min:10 does on to, so a one-element array already reaches the DB binding.
         $body = ['to' => '18479043315', 'template' => 'etp_welcome_a', 'language' => 'en_US',
-                 'message_id' => 'wamid.BENCH_W4', 'utc_time' => '2026-11-06T10:00:00Z'];
+            'message_id' => 'wamid.BENCH_W4', 'utc_time' => '2026-11-06T10:00:00Z'];
         $body[$field] = $value;
 
         $this->postJson('/inbound/record-send', $body, $this->bearer())->assertStatus(422);
@@ -5795,7 +5794,7 @@ class VerifyWaBearer
         $expected = (string) config('whatsapp.export_token', '');
         $given = (string) $request->bearerToken();
 
-        if ($expected === '' || $given === '' || !hash_equals($expected, $given)) {
+        if ($expected === '' || $given === '' || ! hash_equals($expected, $given)) {
             return response()->json(['message' => 'unauthorized'], 401);
         }
 
@@ -5814,6 +5813,7 @@ namespace App\Http\Controllers;
 use App\Models\WaContact;
 use App\Models\WaMessage;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Validation\ValidationException;
 
 class MachineController extends Controller
@@ -5843,15 +5843,15 @@ class MachineController extends Controller
         // Measured: an uncaught InvalidArgumentException renders a 500 here, so the bench gets a server
         // error for a body it could fix. Reject it as a 422 through WaContact's own predicate instead --
         // one definition of "dialable", no duplicated length literals.
-        if (!WaContact::isDialable(WaContact::digitsOnly($data['to']))) {
+        if (! WaContact::isDialable(WaContact::digitsOnly($data['to']))) {
             throw ValidationException::withMessages([
                 'to' => 'The to field must contain a dialable phone number.',
             ]);
         }
 
         $contact = WaContact::fromPhone($data['to']);
-        $sentAt = isset($data['utc_time']) && \Illuminate\Support\Carbon::hasFormat($data['utc_time'], 'Y-m-d\TH:i:s\Z')
-            ? \Illuminate\Support\Carbon::parse($data['utc_time'], 'UTC')
+        $sentAt = isset($data['utc_time']) && Carbon::hasFormat($data['utc_time'], 'Y-m-d\TH:i:s\Z')
+            ? Carbon::parse($data['utc_time'], 'UTC')
             : now();
 
         WaMessage::record([
@@ -6884,8 +6884,8 @@ class InboxActionsTest extends TestCase
         parent::setUp();
         $this->actingAs(User::factory()->create());
         config(['whatsapp.token' => 'tok-test', 'whatsapp.phone_id' => '1427706937088002',
-                'whatsapp.template_choices' => ['etp_opener_brand', 'etp_welcome_c'],
-                'whatsapp.header_images' => ['etp_opener_brand' => 'https://example.test/logo.png']]);
+            'whatsapp.template_choices' => ['etp_opener_brand', 'etp_welcome_c'],
+            'whatsapp.header_images' => ['etp_opener_brand' => 'https://example.test/logo.png']]);
         $this->contact = WaContact::factory()->create(['phone' => '18479043315',
             'profile_name' => 'Jane Tester', 'last_inbound_at' => now()->subHour()]);
         // R41: the first draft installed Http::fake(['*' => ... wamid.STAFF1 ...]) here, which shadowed
@@ -6898,7 +6898,7 @@ class InboxActionsTest extends TestCase
     public function test_reply_inside_the_window_is_sent_and_stored()
     {
         Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.STAFF1']]], 200)]);
-        $this->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'Happy to help.'])
+        $this->post('/inbox/'.$this->contact->id.'/reply', ['body' => 'Happy to help.'])
             ->assertRedirect();
         $m = WaMessage::where('meta_id', 'wamid.STAFF1')->firstOrFail();
         $this->assertSame(WaMessage::OUT, $m->direction);
@@ -6912,14 +6912,14 @@ class InboxActionsTest extends TestCase
         // No Http::fake() and no in-test preventStrayRequests(): setUp's guard is what makes the name
         // true. If the window check broke, the controller would attempt a send, nothing would be stubbed,
         // and this test would fail with StrayRequestException instead of quietly passing on a count.
-        $this->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'late'])
+        $this->post('/inbox/'.$this->contact->id.'/reply', ['body' => 'late'])
             ->assertSessionHasErrors('window');
         $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
     }
 
     public function test_empty_reply_is_rejected()
     {
-        $this->post('/inbox/' . $this->contact->id . '/reply', ['body' => '   '])
+        $this->post('/inbox/'.$this->contact->id.'/reply', ['body' => '   '])
             ->assertSessionHasErrors('body');
     }
 
@@ -6927,7 +6927,7 @@ class InboxActionsTest extends TestCase
     {
         Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.STAFF1']]], 200)]);
         $this->contact->update(['last_inbound_at' => now()->subDays(3)]);
-        $this->post('/inbox/' . $this->contact->id . '/template',
+        $this->post('/inbox/'.$this->contact->id.'/template',
             ['template' => 'etp_opener_brand', 'language' => 'en', 'variables' => 'Jane'])->assertRedirect();
 
         Http::assertSent(fn ($r) => $r['type'] === 'template'
@@ -6941,7 +6941,7 @@ class InboxActionsTest extends TestCase
     {
         // No stub: an unapproved name must be refused before the sender is reached, and setUp's
         // preventStrayRequests() turns any attempt into a failure rather than a silent 200.
-        $this->post('/inbox/' . $this->contact->id . '/template',
+        $this->post('/inbox/'.$this->contact->id.'/template',
             ['template' => 'made_up_template', 'language' => 'en', 'variables' => ''])->assertSessionHasErrors('template');
         $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
     }
@@ -6952,9 +6952,9 @@ class InboxActionsTest extends TestCase
         // attempt to reach Graph here is a failure, not something to be answered.
         $this->contact->optOut('inbound_keyword');
 
-        $this->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'hi'])
+        $this->post('/inbox/'.$this->contact->id.'/reply', ['body' => 'hi'])
             ->assertSessionHasErrors('window');
-        $this->post('/inbox/' . $this->contact->id . '/template',
+        $this->post('/inbox/'.$this->contact->id.'/template',
             ['template' => 'etp_welcome_c', 'language' => 'en_US', 'variables' => ''])
             ->assertSessionHasErrors('window');
         $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
@@ -6962,13 +6962,13 @@ class InboxActionsTest extends TestCase
 
     public function test_manual_opt_out_stops_the_thread_from_sending()
     {
-        $this->post('/inbox/' . $this->contact->id . '/opt-out')->assertRedirect();
+        $this->post('/inbox/'.$this->contact->id.'/opt-out')->assertRedirect();
         $this->assertTrue($this->contact->fresh()->isOptedOut());
         $this->assertSame('manual', $this->contact->fresh()->opt_out_source);
         // The name promises more than the state change above proves, so the send attempt is part of the
         // test: an opted-out thread must be refused before the sender runs. Without these two lines a
         // regression that recorded the opt-out but kept sending would still pass.
-        $this->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'after'])
+        $this->post('/inbox/'.$this->contact->id.'/reply', ['body' => 'after'])
             ->assertSessionHasErrors('window');
         $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
     }
@@ -6976,7 +6976,7 @@ class InboxActionsTest extends TestCase
     public function test_a_guest_cannot_post_a_reply()
     {
         auth()->logout();
-        $this->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'x'])->assertRedirect('/login');
+        $this->post('/inbox/'.$this->contact->id.'/reply', ['body' => 'x'])->assertRedirect('/login');
     }
 
     // ---- witness rows owed by the brief (each names the arm it kills) ----
@@ -6985,9 +6985,9 @@ class InboxActionsTest extends TestCase
     public function test_a_guest_cannot_post_a_template_or_an_opt_out()
     {
         auth()->logout();
-        $this->post('/inbox/' . $this->contact->id . '/template',
+        $this->post('/inbox/'.$this->contact->id.'/template',
             ['template' => 'etp_opener_brand', 'language' => 'en', 'variables' => ''])->assertRedirect('/login');
-        $this->post('/inbox/' . $this->contact->id . '/opt-out')->assertRedirect('/login');
+        $this->post('/inbox/'.$this->contact->id.'/opt-out')->assertRedirect('/login');
         $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
         $this->assertFalse($this->contact->fresh()->isOptedOut());
     }
@@ -6997,8 +6997,8 @@ class InboxActionsTest extends TestCase
     public function test_a_successful_reply_flashes_sent_inside_the_ok_wrapper()
     {
         Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.STAFF1']]], 200)]);
-        $response = $this->from('/inbox/' . $this->contact->id)
-            ->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'Happy to help.']);
+        $response = $this->from('/inbox/'.$this->contact->id)
+            ->post('/inbox/'.$this->contact->id.'/reply', ['body' => 'Happy to help.']);
         $this->followRedirects($response)
             ->assertSee('Sent.')
             ->assertSee('<div class="ok">Sent.</div>', false);
@@ -7008,9 +7008,9 @@ class InboxActionsTest extends TestCase
     public function test_a_reply_redirects_back_to_the_thread_it_came_from()
     {
         Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.STAFF1']]], 200)]);
-        $this->from('/inbox/' . $this->contact->id)
-            ->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'Hi'])
-            ->assertRedirect('/inbox/' . $this->contact->id);
+        $this->from('/inbox/'.$this->contact->id)
+            ->post('/inbox/'.$this->contact->id.'/reply', ['body' => 'Hi'])
+            ->assertRedirect('/inbox/'.$this->contact->id);
     }
 
     // W-RERENDER: the request side of Task 11 row 25 -- a real refused POST feeding withErrors +
@@ -7018,8 +7018,8 @@ class InboxActionsTest extends TestCase
     public function test_a_refused_reply_re_renders_the_thread_with_the_error_and_the_old_body()
     {
         $this->contact->update(['last_inbound_at' => now()->subHours(30)]);
-        $response = $this->from('/inbox/' . $this->contact->id)
-            ->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'keep me']);
+        $response = $this->from('/inbox/'.$this->contact->id)
+            ->post('/inbox/'.$this->contact->id.'/reply', ['body' => 'keep me']);
         $this->followRedirects($response)
             ->assertSee('The 24-hour reply window is closed. Send an approved template instead.')
             ->assertSee('<textarea name="body">keep me</textarea>', false);
@@ -7045,7 +7045,7 @@ class InboxActionsTest extends TestCase
     #[DataProvider('overWideProvider')]
     public function test_over_wide_input_is_rejected_without_sending(string $action, array $payload, string $field)
     {
-        $this->post('/inbox/' . $this->contact->id . '/' . $action, $payload)
+        $this->post('/inbox/'.$this->contact->id.'/'.$action, $payload)
             ->assertSessionHasErrors($field);
         $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
     }
@@ -7061,7 +7061,7 @@ class InboxActionsTest extends TestCase
     public function test_comma_padded_variables_produce_exactly_one_body_parameter(string $variables)
     {
         Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.STAFF1']]], 200)]);
-        $this->post('/inbox/' . $this->contact->id . '/template',
+        $this->post('/inbox/'.$this->contact->id.'/template',
             ['template' => 'etp_opener_brand', 'language' => 'en', 'variables' => $variables])->assertRedirect();
 
         Http::assertSentCount(1);
@@ -7074,15 +7074,15 @@ class InboxActionsTest extends TestCase
     // manual opt-out must not move opted_out_at, and both views must show the silenced state.
     public function test_a_second_manual_opt_out_does_not_move_the_timestamp()
     {
-        $this->post('/inbox/' . $this->contact->id . '/opt-out')->assertRedirect();
+        $this->post('/inbox/'.$this->contact->id.'/opt-out')->assertRedirect();
         $first = $this->contact->fresh()->opted_out_at;
         $this->assertNotNull($first);
 
-        $this->post('/inbox/' . $this->contact->id . '/opt-out')->assertRedirect();
+        $this->post('/inbox/'.$this->contact->id.'/opt-out')->assertRedirect();
         $second = $this->contact->fresh()->opted_out_at;
         $this->assertSame($first->format('Y-m-d H:i:s.u'), $second->format('Y-m-d H:i:s.u'));
 
-        $this->get('/inbox/' . $this->contact->id)->assertSee('OPTED OUT (manual');
+        $this->get('/inbox/'.$this->contact->id)->assertSee('OPTED OUT (manual');
         $this->get('/inbox')->assertSee('opted out');
     }
 
@@ -7094,8 +7094,8 @@ class InboxActionsTest extends TestCase
             'message' => 'Re-engagement message', 'code' => 131030,
             'error_data' => ['details' => 'Message undeliverable'],
         ]], 400)]);
-        $response = $this->from('/inbox/' . $this->contact->id)
-            ->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'late note']);
+        $response = $this->from('/inbox/'.$this->contact->id)
+            ->post('/inbox/'.$this->contact->id.'/reply', ['body' => 'late note']);
         $this->followRedirects($response)
             ->assertSee('Meta refused')
             ->assertSee('Message undeliverable');
@@ -7109,8 +7109,8 @@ class InboxActionsTest extends TestCase
     // and the whole suite stayed green. Follow the real redirect and pin the exact copy + wrapper.
     public function test_a_manual_opt_out_flashes_the_confirmation_copy()
     {
-        $response = $this->from('/inbox/' . $this->contact->id)
-            ->post('/inbox/' . $this->contact->id . '/opt-out');
+        $response = $this->from('/inbox/'.$this->contact->id)
+            ->post('/inbox/'.$this->contact->id.'/opt-out');
         $this->followRedirects($response)
             ->assertSee('<div class="ok">Marked opted out. No further messages will be sent to this number.</div>', false);
     }
@@ -7120,8 +7120,8 @@ class InboxActionsTest extends TestCase
     public function test_a_successful_template_flashes_template_sent_inside_the_ok_wrapper()
     {
         Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.STAFF1']]], 200)]);
-        $response = $this->from('/inbox/' . $this->contact->id)
-            ->post('/inbox/' . $this->contact->id . '/template',
+        $response = $this->from('/inbox/'.$this->contact->id)
+            ->post('/inbox/'.$this->contact->id.'/template',
                 ['template' => 'etp_welcome_c', 'language' => 'en_US', 'variables' => '']);
         $this->followRedirects($response)
             ->assertSee('<div class="ok">Template sent.</div>', false);
@@ -7133,9 +7133,9 @@ class InboxActionsTest extends TestCase
     public function test_the_three_action_routes_resolve_by_name_to_the_form_urls()
     {
         $id = $this->contact->id;
-        $this->assertSame(url('/inbox/' . $id . '/reply'), route('inbox.reply', $id));
-        $this->assertSame(url('/inbox/' . $id . '/template'), route('inbox.template', $id));
-        $this->assertSame(url('/inbox/' . $id . '/opt-out'), route('inbox.optout', $id));
+        $this->assertSame(url('/inbox/'.$id.'/reply'), route('inbox.reply', $id));
+        $this->assertSame(url('/inbox/'.$id.'/template'), route('inbox.template', $id));
+        $this->assertSame(url('/inbox/'.$id.'/opt-out'), route('inbox.optout', $id));
     }
 
     public function test_a_refused_template_flashes_meta_refused_with_the_code_and_stores_the_failed_row()
@@ -7144,8 +7144,8 @@ class InboxActionsTest extends TestCase
             'message' => 'Re-engagement message', 'code' => 131030,
             'error_data' => ['details' => 'Message undeliverable'],
         ]], 400)]);
-        $response = $this->from('/inbox/' . $this->contact->id)
-            ->post('/inbox/' . $this->contact->id . '/template',
+        $response = $this->from('/inbox/'.$this->contact->id)
+            ->post('/inbox/'.$this->contact->id.'/template',
                 ['template' => 'etp_welcome_c', 'language' => 'en_US', 'variables' => '']);
         $this->followRedirects($response)
             ->assertSee('Meta refused (')
@@ -7191,8 +7191,8 @@ class InboxController extends Controller
         $contacts = WaContact::query()
             ->when($q !== '', function ($query) use ($q) {
                 $query->where(function ($inner) use ($q) {
-                    $inner->where('phone', 'like', '%' . $q . '%')
-                          ->orWhere('profile_name', 'like', '%' . $q . '%');
+                    $inner->where('phone', 'like', '%'.$q.'%')
+                        ->orWhere('profile_name', 'like', '%'.$q.'%');
                 });
             })
             ->withCount(['messages as inbound_count' => fn ($q2) => $q2->where('direction', WaMessage::IN)])
@@ -7218,7 +7218,7 @@ class InboxController extends Controller
     {
         $data = $request->validate(['body' => ['required', 'string', 'max:4096']]);
 
-        if (!$contact->windowOpen()) {
+        if (! $contact->windowOpen()) {
             return back()->withInput()->withErrors(['window' => 'The 24-hour reply window is closed. Send an approved template instead.']);
         }
 
@@ -7229,7 +7229,7 @@ class InboxController extends Controller
         }
 
         return back()->with('result', $message->status === WaMessage::FAILED
-            ? 'Meta refused: ' . $message->error_title
+            ? 'Meta refused: '.$message->error_title
             : 'Sent.');
     }
 
@@ -7251,7 +7251,7 @@ class InboxController extends Controller
         }
 
         return back()->with('result', $message->status === WaMessage::FAILED
-            ? 'Meta refused (' . $message->error_code . '): ' . $message->error_title
+            ? 'Meta refused ('.$message->error_code.'): '.$message->error_title
             : 'Template sent.');
     }
 
@@ -7297,26 +7297,24 @@ use Illuminate\Http\Client\Factory;
 
 class WhatsAppSender
 {
-    public function __construct(private Factory $http)
-    {
-    }
+    public function __construct(private Factory $http) {}
 
     public function sendText(string $phone, string $text, bool $autoReply = false,
-                             bool $allowSuppressed = false): WaMessage
+        bool $allowSuppressed = false): WaMessage
     {
         return $this->post(
             ['messaging_product' => 'whatsapp', 'to' => $phone, 'type' => 'text',
-             'text' => ['preview_url' => false, 'body' => $text]],
+                'text' => ['preview_url' => false, 'body' => $text]],
             $phone,
             ['direction' => WaMessage::OUT, 'type' => 'text', 'body' => $text,
-             'auto_reply' => $autoReply],
+                'auto_reply' => $autoReply],
             $allowSuppressed,
         );
     }
 
     public function sendTemplate(string $phone, string $name, string $lang,
-                                 array $variables = [], bool $autoReply = false,
-                                 bool $allowSuppressed = false): WaMessage
+        array $variables = [], bool $autoReply = false,
+        bool $allowSuppressed = false): WaMessage
     {
         $components = [];
         $image = (string) (config('whatsapp.header_images')[$name] ?? '');
@@ -7336,10 +7334,10 @@ class WhatsAppSender
 
         return $this->post(
             ['messaging_product' => 'whatsapp', 'to' => $phone, 'type' => 'template',
-             'template' => $template],
+                'template' => $template],
             $phone,
             ['direction' => WaMessage::OUT, 'type' => 'template', 'template_name' => $name,
-             'template_lang' => $lang, 'auto_reply' => $autoReply],
+                'template_lang' => $lang, 'auto_reply' => $autoReply],
             $allowSuppressed,
         );
     }
@@ -7356,7 +7354,7 @@ class WhatsAppSender
     }
 
     private function post(array $payload, string $phone, array $attrs,
-                          bool $allowSuppressed = false): WaMessage
+        bool $allowSuppressed = false): WaMessage
     {
         // R35: the contact row and the payload have to agree. fromPhone() normalises internally, so
         // the first draft stored digits while sending the caller's punctuation -- Meta answers that
@@ -7372,8 +7370,8 @@ class WhatsAppSender
         // between this read and the send can slip one message; the plan sanctions accepting the race
         // (recorded in the ledger).
         $gateContact = WaContact::where('phone', $phone)->first();
-        if (!$allowSuppressed && $gateContact?->isOptedOut()) {
-            throw new SuppressedContactException();
+        if (! $allowSuppressed && $gateContact?->isOptedOut()) {
+            throw new SuppressedContactException;
         }
 
         $contact = WaContact::fromPhone($phone);
@@ -7393,7 +7391,7 @@ class WhatsAppSender
             ]);
         }
 
-        $url = rtrim((string) config('whatsapp.api_base'), '/') . '/' . $phoneId . '/messages';
+        $url = rtrim((string) config('whatsapp.api_base'), '/').'/'.$phoneId.'/messages';
 
         try {
             // R33: ->timeout() is the option. post() is declared post(string $url, $data = [])
@@ -7459,9 +7457,7 @@ use Illuminate\Support\Facades\Cache;
 
 class AutoResponder
 {
-    public function __construct(private WhatsAppSender $sender)
-    {
-    }
+    public function __construct(private WhatsAppSender $sender) {}
 
     public function handle(WaMessage $in, ?string $buttonId = null): void
     {
@@ -7476,7 +7472,7 @@ class AutoResponder
             $wasSilenced = $contact->isOptedOut();
             $contact->optOut('inbound_keyword');
             $text = (string) config('whatsapp.opt_out_text', '');
-            if (!$wasSilenced && $text !== '') {
+            if (! $wasSilenced && $text !== '') {
                 // D1: the ONE exemption to the sender's suppression gate -- the confirmation the
                 // suppression regime owes the contact after their own STOP.
                 $this->sender->sendText($contact->phone, $text, autoReply: true, allowSuppressed: true);
@@ -7512,7 +7508,7 @@ class AutoResponder
         }
 
         // The race guard. Atomic on the production store, not on the test store -- see R46.
-        if (!Cache::add('wa-ack-' . $contact->id, 1, now()->addHours($hours))) {
+        if (! Cache::add('wa-ack-'.$contact->id, 1, now()->addHours($hours))) {
             return;
         }
 
@@ -7659,6 +7655,7 @@ use App\Models\WaMessage;
 use App\Services\SuppressedContactException;
 use App\Services\WhatsAppSender;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
@@ -7742,7 +7739,7 @@ class WhatsAppSenderTest extends TestCase
     {
         Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.OUT11']]], 200)]);
         app(WhatsAppSender::class)->sendTemplate('18479043315', 'etp_welcome_c', 'en_US');
-        Http::assertSent(fn ($r) => !array_key_exists('components', $r['template']));
+        Http::assertSent(fn ($r) => ! array_key_exists('components', $r['template']));
     }
 
     public function test_a_punctuated_phone_is_stored_and_sent_as_digits()
@@ -7792,7 +7789,7 @@ class WhatsAppSenderTest extends TestCase
         // reached the catch -- every fake answered, and the two config guards return before the
         // request. A cURL error message is unbounded text that lands in error_title(255), so the same
         // reader caps it here as it does Meta's own message.
-        Http::fake(['*' => fn () => throw new \Illuminate\Http\Client\ConnectionException(
+        Http::fake(['*' => fn () => throw new ConnectionException(
             str_repeat('x', 400))]);
 
         $m = app(WhatsAppSender::class)->sendText('18479043315', 'x');
@@ -8107,7 +8104,7 @@ class ImportSendLogTest extends TestCase
     public function test_a_missing_file_fails_without_touching_the_database()
     {
         $this->artisan('wa:import-send-log', ['path' => base_path('tests/Fixtures/nope.csv'),
-                                              '--apply' => true])
+            '--apply' => true])
             ->expectsOutputToContain('not found')
             ->assertExitCode(1);
         $this->assertSame(0, WaMessage::count());
@@ -8160,7 +8157,7 @@ class ImportSendLogTest extends TestCase
     // refused before any row is read, not imported through array_combine warnings.
     public function test_a_file_without_the_send_log_header_is_refused()
     {
-        $path = sys_get_temp_dir() . '/wa-not-a-log-' . getmypid() . '.csv';
+        $path = sys_get_temp_dir().'/wa-not-a-log-'.getmypid().'.csv';
         file_put_contents($path, "name,phone\nJane,18479043315\n");
         try {
             $this->artisan('wa:import-send-log', ['path' => $path, '--apply' => true])
@@ -8200,15 +8197,15 @@ class WaImportSendLog extends Command
     public function handle(): int
     {
         $path = (string) $this->argument('path');
-        if (!is_file($path) || !is_readable($path)) {
-            $this->error('File not found or unreadable: ' . $path);
+        if (! is_file($path) || ! is_readable($path)) {
+            $this->error('File not found or unreadable: '.$path);
 
             return 1;
         }
 
         $handle = fopen($path, 'rb');
         $header = fgetcsv($handle);
-        if (!is_array($header) || !in_array('to', $header, true)) {
+        if (! is_array($header) || ! in_array('to', $header, true)) {
             $this->error('Not a send log: expected a header row containing "to".');
 
             return 1;
@@ -8230,7 +8227,7 @@ class WaImportSendLog extends Command
             // R54/F2: the guard is fromPhone()'s own predicate (10..20 digits, the column width),
             // not strlen >= 10 -- a 21-digit phone passed the narrow guard and crashed --apply
             // mid-loop with partial writes. Undialable rows are counted skipped, like refusals.
-            if (!WaContact::isDialable($phone)) {
+            if (! WaContact::isDialable($phone)) {
                 $skipped++;
 
                 continue;
@@ -8246,7 +8243,7 @@ class WaImportSendLog extends Command
             $distinctPhones[$phone] = true;
             $messages++;
 
-            if (!$apply) {
+            if (! $apply) {
                 continue;
             }
 
@@ -8272,7 +8269,7 @@ class WaImportSendLog extends Command
 
         $this->line($apply ? "Imported {$messages} messages, {$contacts} contacts, {$skipped} skipped."
                            : "DRY RUN: would import {$messages} messages, {$contacts} contacts, {$skipped} skipped.");
-        if (!$apply) {
+        if (! $apply) {
             $this->line('Re-run with --apply to write.');
         }
 
@@ -8335,9 +8332,9 @@ class InboxViewTest extends TestCase
     public function test_list_shows_name_number_and_state()
     {
         $talking = WaContact::factory()->create(['phone' => '18479043315', 'profile_name' => 'Jane Tester',
-                                                 'last_inbound_at' => now()]);
+            'last_inbound_at' => now()]);
         WaMessage::factory()->create(['wa_contact_id' => $talking->id, 'direction' => WaMessage::IN,
-                                      'sent_at' => now(), 'body' => 'hello']);
+            'sent_at' => now(), 'body' => 'hello']);
         WaContact::factory()->create(['phone' => '15550002222', 'profile_name' => 'Silent Sam'])->optOut('manual');
 
         $this->get('/inbox')->assertOk()
@@ -8359,22 +8356,22 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '18479043315', 'profile_name' => 'Jane Tester']);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
-                                      'meta_id' => 'wamid.I1', 'body' => 'Is this E Tax Planner?',
-                                      'sent_at' => now()->subMinutes(30)]);
+            'meta_id' => 'wamid.I1', 'body' => 'Is this E Tax Planner?',
+            'sent_at' => now()->subMinutes(30)]);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'meta_id' => 'wamid.O1', 'type' => 'template',
-                                      'template_name' => 'etp_opener_brand', 'template_lang' => 'en',
-                                      'body' => 'Hi Jane, ...', 'status' => WaMessage::DELIVERED,
-                                      'auto_reply' => false, 'sent_at' => now()->subHour()]);
+            'meta_id' => 'wamid.O1', 'type' => 'template',
+            'template_name' => 'etp_opener_brand', 'template_lang' => 'en',
+            'body' => 'Hi Jane, ...', 'status' => WaMessage::DELIVERED,
+            'auto_reply' => false, 'sent_at' => now()->subHour()]);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'meta_id' => 'wamid.O2', 'auto_reply' => true, 'status' => WaMessage::SENT,
-                                      'body' => 'Thanks, a human will reply.', 'sent_at' => now()->subMinutes(20)]);
+            'meta_id' => 'wamid.O2', 'auto_reply' => true, 'status' => WaMessage::SENT,
+            'body' => 'Thanks, a human will reply.', 'sent_at' => now()->subMinutes(20)]);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'meta_id' => null, 'status' => WaMessage::FAILED,
-                                      'error_code' => '131030', 'error_title' => 'Re-engagement message',
-                                      'body' => 'late note', 'sent_at' => now()->subMinute()]);
+            'meta_id' => null, 'status' => WaMessage::FAILED,
+            'error_code' => '131030', 'error_title' => 'Re-engagement message',
+            'body' => 'late note', 'sent_at' => now()->subMinute()]);
 
-        $this->get('/inbox/' . $c->id)->assertOk()
+        $this->get('/inbox/'.$c->id)->assertOk()
             ->assertSee('Is this E Tax Planner?')
             ->assertSee('Jane Tester')
             ->assertSee('delivered')
@@ -8389,7 +8386,7 @@ class InboxViewTest extends TestCase
         $c = WaContact::factory()->create(['phone' => '18479043315']);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'type' => 'image', 'body' => null]);
 
-        $this->get('/inbox/' . $c->id)->assertOk()
+        $this->get('/inbox/'.$c->id)->assertOk()
             ->assertSee('(image message - text not stored here)');
     }
 
@@ -8403,12 +8400,12 @@ class InboxViewTest extends TestCase
     public function test_list_shows_window_state_three_ways_and_prefers_opted_out()
     {
         WaContact::factory()->create(['phone' => '15550001111', 'profile_name' => 'Win Open',
-                                      'last_inbound_at' => now()]);
+            'last_inbound_at' => now()]);
         WaContact::factory()->create(['phone' => '15550002222', 'profile_name' => 'Window Stale',
-                                      'last_inbound_at' => now()->subHours(25)]);
+            'last_inbound_at' => now()->subHours(25)]);
         WaContact::factory()->create(['phone' => '15550003333', 'profile_name' => 'Never One']);
         WaContact::factory()->create(['phone' => '15550004444', 'profile_name' => 'Both States',
-                                      'last_inbound_at' => now()])->optOut('manual');
+            'last_inbound_at' => now()])->optOut('manual');
 
         $content = $this->get('/inbox')->assertOk()->getContent();
 
@@ -8443,7 +8440,7 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15550202020']);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertSame(4, substr_count($content, 'name="_token"'));
     }
@@ -8452,18 +8449,18 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15550303030', 'profile_name' => 'Sided']);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
-                                      'meta_id' => 'wamid.S1', 'sent_at' => now()->subMinutes(30)]);
+            'meta_id' => 'wamid.S1', 'sent_at' => now()->subMinutes(30)]);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'meta_id' => 'wamid.S2', 'sent_at' => now()->subHour()]);
+            'meta_id' => 'wamid.S2', 'sent_at' => now()->subHour()]);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'meta_id' => 'wamid.S3', 'auto_reply' => true,
-                                      'sent_at' => now()->subMinutes(20)]);
+            'meta_id' => 'wamid.S3', 'auto_reply' => true,
+            'sent_at' => now()->subMinutes(20)]);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'meta_id' => null, 'status' => WaMessage::FAILED,
-                                      'error_code' => '131030', 'error_title' => 'Re-engagement message',
-                                      'sent_at' => now()->subMinute()]);
+            'meta_id' => null, 'status' => WaMessage::FAILED,
+            'error_code' => '131030', 'error_title' => 'Re-engagement message',
+            'sent_at' => now()->subMinute()]);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertSame(1, substr_count($content, 'class="bubble in"'));
         $this->assertSame(3, substr_count($content, 'class="bubble out"'));
@@ -8475,9 +8472,9 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15550404040']);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'status' => WaMessage::SENT, 'auto_reply' => false]);
+            'status' => WaMessage::SENT, 'auto_reply' => false]);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertStringNotContainsString('FAILED', $content);
     }
@@ -8486,10 +8483,10 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15550505050']);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'type' => 'template', 'template_name' => 'etp_opener_brand',
-                                      'template_lang' => 'en', 'status' => WaMessage::DELIVERED]);
+            'type' => 'template', 'template_name' => 'etp_opener_brand',
+            'template_lang' => 'en', 'status' => WaMessage::DELIVERED]);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertStringContainsString('etp_opener_brand (en)', $content);
     }
@@ -8499,7 +8496,7 @@ class InboxViewTest extends TestCase
         $c = WaContact::factory()->create(['phone' => '15550606060']);
         $c->optOut('manual');
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertStringContainsString('OPTED OUT (manual', $content);
     }
@@ -8509,8 +8506,8 @@ class InboxViewTest extends TestCase
         $open = WaContact::factory()->create(['phone' => '15550707070', 'last_inbound_at' => now()]);
         $closed = WaContact::factory()->create(['phone' => '15550707071', 'last_inbound_at' => now()->subHours(25)]);
 
-        $this->get('/inbox/' . $open->id)->assertOk()->assertSee('reply window open');
-        $this->get('/inbox/' . $closed->id)->assertOk()
+        $this->get('/inbox/'.$open->id)->assertOk()->assertSee('reply window open');
+        $this->get('/inbox/'.$closed->id)->assertOk()
             ->assertSee('reply window closed - approved template required');
     }
 
@@ -8522,7 +8519,7 @@ class InboxViewTest extends TestCase
         try {
             $c = WaContact::factory()->create(['phone' => '15550808080']);
 
-            $this->get('/inbox/' . $c->id)->assertOk()
+            $this->get('/inbox/'.$c->id)->assertOk()
                 ->assertSee('<option value="etp_probe_a">', false)
                 ->assertSee('<option value="etp_probe_b">', false);
         } finally {
@@ -8559,15 +8556,15 @@ class InboxViewTest extends TestCase
     {
         $senior = WaContact::factory()->create(['profile_name' => 'Senior Id', 'last_inbound_at' => now()]);
         $junior = WaContact::factory()->create(['profile_name' => 'Junior Id',
-                                                'last_inbound_at' => now()->subHours(10)]);
+            'last_inbound_at' => now()->subHours(10)]);
         $this->assertLessThan($junior->id, $senior->id);
 
         $content = $this->get('/inbox')->assertOk()->getContent();
 
         // PHPUnit's assertLessThan($limit, $actual): the senior (fresher activity, lower id)
         // link must sit at a SMALLER byte offset than the junior one.
-        $this->assertLessThan(strpos($content, 'href="/inbox/' . $junior->id),
-                              strpos($content, 'href="/inbox/' . $senior->id));
+        $this->assertLessThan(strpos($content, 'href="/inbox/'.$junior->id),
+            strpos($content, 'href="/inbox/'.$senior->id));
     }
 
     public function test_list_breaks_an_activity_tie_by_descending_id()
@@ -8578,8 +8575,8 @@ class InboxViewTest extends TestCase
 
         $content = $this->get('/inbox')->assertOk()->getContent();
 
-        $this->assertLessThan(strpos($content, 'href="/inbox/' . $low->id),
-                              strpos($content, 'href="/inbox/' . $high->id));
+        $this->assertLessThan(strpos($content, 'href="/inbox/'.$low->id),
+            strpos($content, 'href="/inbox/'.$high->id));
     }
 
     public function test_a_blank_query_lists_everyone_like_no_query_at_all()
@@ -8614,7 +8611,7 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15551010101']);
 
-        $this->get('/inbox/' . $c->id)->assertOk()->assertSee('Nothing here yet.');
+        $this->get('/inbox/'.$c->id)->assertOk()->assertSee('Nothing here yet.');
     }
 
     public function test_the_two_inbox_route_names_the_fence_promises_exist()
@@ -8626,7 +8623,7 @@ class InboxViewTest extends TestCase
     public function test_list_shows_a_relative_time_for_the_last_inbound()
     {
         WaContact::factory()->create(['phone' => '15551111111', 'profile_name' => 'Two Days',
-                                      'last_inbound_at' => now()->subDays(2)->subMinutes(1)]);
+            'last_inbound_at' => now()->subDays(2)->subMinutes(1)]);
 
         $content = $this->get('/inbox')->assertOk()->getContent();
 
@@ -8645,7 +8642,7 @@ class InboxViewTest extends TestCase
         ]));
 
         $this->withSession(['errors' => $bag, '_old_input' => ['body' => 'etp old reply text']])
-            ->get('/inbox/' . $c->id)->assertOk()
+            ->get('/inbox/'.$c->id)->assertOk()
             ->assertSee('Reply body cannot be blank.')
             ->assertSee('The 24-hour window is closed.')
             ->assertSee('Pick an approved template.')
@@ -8660,7 +8657,7 @@ class InboxViewTest extends TestCase
         auth()->logout();
 
         $this->get('/inbox')->assertRedirect('/login');
-        $this->get('/inbox/' . $c->id)->assertRedirect('/login');
+        $this->get('/inbox/'.$c->id)->assertRedirect('/login');
         $this->assertGuest();
     }
 
@@ -8668,11 +8665,11 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15551112222']);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
-                                      'body' => 'SECOND-MSG', 'sent_at' => now()->subMinutes(10)]);
+            'body' => 'SECOND-MSG', 'sent_at' => now()->subMinutes(10)]);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
-                                      'body' => 'FIRST-MSG', 'sent_at' => now()->subMinutes(30)]);
+            'body' => 'FIRST-MSG', 'sent_at' => now()->subMinutes(30)]);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertLessThan(strpos($content, 'SECOND-MSG'), strpos($content, 'FIRST-MSG'));
     }
@@ -8681,9 +8678,9 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15552121212']);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
-                                      'body' => '<script>alert(1)</script>']);
+            'body' => '<script>alert(1)</script>']);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertStringContainsString('&lt;script&gt;alert(1)&lt;/script&gt;', $content);
         $this->assertStringNotContainsString('<script>alert(1)', $content);
@@ -8693,7 +8690,7 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15552222222', 'profile_name' => '<b>XSS Name</b>']);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertStringContainsString('<h2 style="margin:0">&lt;b&gt;XSS Name&lt;/b&gt;', $content);
         $this->assertStringContainsString('value="&lt;b&gt;XSS Name&lt;/b&gt;"', $content);
@@ -8713,24 +8710,24 @@ class InboxViewTest extends TestCase
     public function test_a_never_replied_contact_sorts_by_its_creation_not_below_active_ones()
     {
         $stale = WaContact::factory()->create(['phone' => '15551919191', 'profile_name' => 'Stale Active',
-                                               'last_inbound_at' => now()->subDays(3)]);
+            'last_inbound_at' => now()->subDays(3)]);
         $freshNull = WaContact::factory()->create(['phone' => '15552020202', 'profile_name' => 'Fresh Never']);
 
         $content = $this->get('/inbox')->assertOk()->getContent();
 
-        $this->assertLessThan(strpos($content, 'href="/inbox/' . $stale->id),
-                              strpos($content, 'href="/inbox/' . $freshNull->id));
+        $this->assertLessThan(strpos($content, 'href="/inbox/'.$stale->id),
+            strpos($content, 'href="/inbox/'.$freshNull->id));
     }
 
     public function test_the_three_thread_forms_post_to_the_task_12_urls()
     {
         $c = WaContact::factory()->create(['phone' => '15551414141']);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
-        $this->assertStringContainsString('action="/inbox/' . $c->id . '/reply"', $content);
-        $this->assertStringContainsString('action="/inbox/' . $c->id . '/template"', $content);
-        $this->assertStringContainsString('action="/inbox/' . $c->id . '/opt-out"', $content);
+        $this->assertStringContainsString('action="/inbox/'.$c->id.'/reply"', $content);
+        $this->assertStringContainsString('action="/inbox/'.$c->id.'/template"', $content);
+        $this->assertStringContainsString('action="/inbox/'.$c->id.'/opt-out"', $content);
     }
 
     public function test_pagination_ends_are_spans_not_empty_links()
@@ -8752,9 +8749,9 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15551515151']);
         $m = WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
-                                           'sent_at' => now()->subMinutes(30)]);
+            'sent_at' => now()->subMinutes(30)]);
 
-        $this->get('/inbox/' . $c->id)->assertOk()
+        $this->get('/inbox/'.$c->id)->assertOk()
             ->assertSee($m->sent_at->toDayDateTimeString());
     }
 
@@ -8763,7 +8760,7 @@ class InboxViewTest extends TestCase
         $c = WaContact::factory()->create(['phone' => '15551616161']);
 
         $content = $this->withSession(['_old_input' => ['body' => '<script>alert(2)</script>']])
-            ->get('/inbox/' . $c->id)->assertOk()->getContent();
+            ->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertStringContainsString('&lt;script&gt;alert(2)&lt;/script&gt;', $content);
         $this->assertStringNotContainsString('<script>alert(2)', $content);
@@ -8773,9 +8770,9 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15551717171']);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'type' => 'text', 'status' => WaMessage::SENT]);
+            'type' => 'text', 'status' => WaMessage::SENT]);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertStringNotContainsString('&middot; template', $content);
     }
@@ -8794,7 +8791,7 @@ class InboxViewTest extends TestCase
         $list = $this->get('/inbox')->assertOk()->getContent();
         $this->assertSame(2, substr_count($list, '+15551818181')); // link text + Number column
 
-        $thread = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $thread = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
         $this->assertStringContainsString('<h2 style="margin:0">+15551818181', $thread);
     }
 
@@ -8889,7 +8886,28 @@ record: `.superpowers/sdd/2026-11-06-wa-webhook-inbox/task-13-report.md`. **Task
 
 **Deliverable:** webhook events stop accumulating after 30 days without a cron line nobody wrote down, and the whole suite plus Laravel Pint are clean.
 
-- [ ] **Step 1: Write the failing test** — `tests/Feature/PruneEventsTest.php`
+**R55 ruling — executed INLINE (no subagent types available); no independent subagent review was
+performed. Pre-flight: `task-14-preflight.md` (P1–P5); report: `task-14-report.md`.**
+
+1. **P2 — the command fence's comment was wrong:** `received_at` is a plain datetime cast, NOT
+   encrypted (only `changes` is `encrypted:array`). The surviving chunking rationale: a one-shot
+   mass delete locks the table on a big backlog. Comment corrected; behaviour unchanged.
+2. **P3 — Pint flagged 35 files (measured `pint --test`), nearly the whole shipped codebase.** The
+   plan sanctions one Pint run + a separate `style: pint` commit, but Tasks 1-13 fence shipped files
+   byte-exact. Procedure: BEFORE Pint, map every plan fence that matches a whole repo file (27
+   fences / 27 files, `t14-fence-map.mjs` → `Temp/t14pint/fence-map.json`); run Pint; whole suite
+   unchanged (307 rows); then re-emit every mapped fence from post-Pint bytes (`sync-task14-r55.mjs`,
+   27/27 remapped and re-verified). Historical pre-Pint fences in earlier task sections that no
+   longer match current bytes are untouched — they record what those tasks shipped at the time.
+3. **P4 — the schedule had NO witness (R42 gap) and the zero/negative row under-tested its name.**
+   Shipped: a schedule witness row that boots the console routes via `schedule:list` then pins both
+   events on the container's Schedule singleton (mechanism measured in RED: the row failed with
+   "not scheduled", proving the singleton is observable in tests — no fallback needed); and the
+   refused-window row became a provider [0, -3]. Output-copy expectations added to all three prune
+   rows (one per line, R54/D1 mechanism).
+
+- [ ] **Step 1: Write the failing test** — `tests/Feature/PruneEventsTest.php` (shipped: 5 tests /
+23 assertions — the plan's 3 rows with the provider strengthening, plus the schedule witness):
 
 ```php
 <?php
@@ -8897,7 +8915,9 @@ record: `.superpowers/sdd/2026-11-06-wa-webhook-inbox/task-13-report.md`. **Task
 namespace Tests\Feature;
 
 use App\Models\WaWebhookEvent;
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class PruneEventsTest extends TestCase
@@ -8913,7 +8933,9 @@ class PruneEventsTest extends TestCase
         $edge->forceFill(['received_at' => now()->subDays(29)])->save();
         $fresh = WaWebhookEvent::store('1427706937088002', 'E3', ['a' => 3], WaWebhookEvent::STORED);
 
-        $this->artisan('wa:prune-events')->assertSuccessful();
+        $this->artisan('wa:prune-events')
+            ->expectsOutputToContain('Pruned 1 webhook events older than 30 days.')
+            ->assertSuccessful();
 
         $this->assertSame(2, WaWebhookEvent::count());
         $this->assertDatabaseMissing('wa_webhook_events', ['id' => $old->id]);
@@ -8926,22 +8948,55 @@ class PruneEventsTest extends TestCase
         $old = WaWebhookEvent::store('1', 'E1', [], WaWebhookEvent::STORED);
         $old->forceFill(['received_at' => now()->subDays(3)])->save();
 
-        $this->artisan('wa:prune-events', ['--days' => 1])->assertSuccessful();
+        $this->artisan('wa:prune-events', ['--days' => 1])
+            ->expectsOutputToContain('Pruned 1 webhook events older than 1 days.')
+            ->assertSuccessful();
         $this->assertSame(0, WaWebhookEvent::count());
     }
 
-    public function test_a_zero_or_negative_window_is_refused()
+    // R55: the plan's row tested only 0 while its name promised "zero or negative" -- a provider
+    // makes the name honest (the Task 12 lesson: assertions must match the name).
+    public static function refusedWindowProvider(): array
+    {
+        return ['zero' => [0], 'negative' => [-3]];
+    }
+
+    #[DataProvider('refusedWindowProvider')]
+    public function test_a_zero_or_negative_window_is_refused(int $days)
     {
         WaWebhookEvent::store('1', 'E1', [], WaWebhookEvent::STORED);
-        $this->artisan('wa:prune-events', ['--days' => 0])->assertExitCode(1);
+        $this->artisan('wa:prune-events', ['--days' => $days])
+            ->expectsOutputToContain('The retention window must be at least 1 day.')
+            ->assertExitCode(1);
         $this->assertSame(1, WaWebhookEvent::count());
+    }
+
+    // R55 (R42 gap): the plan verified schedule registration only by a human running schedule:list.
+    // This row boots the console routes, then pins both events on the container's Schedule singleton:
+    // the prune at 03:10 and the queue drain every minute, withoutOverlapping, with both flags.
+    public function test_the_schedule_registers_pruning_and_the_queue_drain()
+    {
+        $this->artisan('schedule:list')->assertSuccessful();
+        $events = collect(app(Schedule::class)->events());
+
+        $prune = $events->first(fn ($e) => str_contains($e->command, 'wa:prune-events'));
+        $this->assertNotNull($prune, 'wa:prune-events is not scheduled');
+        $this->assertSame('10 3 * * *', $prune->expression);
+
+        $drain = $events->first(fn ($e) => str_contains($e->command, 'queue:work'));
+        $this->assertNotNull($drain, 'the queue drain is not scheduled');
+        $this->assertSame('* * * * *', $drain->expression);
+        $this->assertTrue($drain->withoutOverlapping);
+        $this->assertStringContainsString('--stop-when-empty', $drain->command);
+        $this->assertStringContainsString('--max-time=50', $drain->command);
     }
 }
 ```
 
-- [ ] **Step 2: Run it** — expected FAIL command not defined.
+- [ ] **Step 2: Run it** — measured RED: `Tests: 5, Assertions: 2, Errors: 4, Failures: 1` — four
+CommandNotFoundException errors and the schedule row failing "wa:prune-events is not scheduled".
 
-- [ ] **Step 3: Create `app/Console/Commands/WaPruneEvents.php`**
+- [ ] **Step 3: Create `app/Console/Commands/WaPruneEvents.php`** (shipped file, post-Pint):
 
 ```php
 <?php
@@ -8970,8 +9025,8 @@ class WaPruneEvents extends Command
         $cut = Carbon::now()->subDays($days);
         $deleted = 0;
 
-        // Chunked deletes: an encrypted column cannot be filtered in SQL, and a
-        // one-shot mass delete would lock the table on a big backlog.
+        // Chunked deletes: a one-shot mass delete would lock the table on a big backlog.
+        // chunkById paginates by id > last, so deleting inside the callback is safe.
         WaWebhookEvent::where('received_at', '<', $cut)
             ->orderBy('id')
             ->chunkById(500, function ($rows) use (&$deleted) {
@@ -8986,10 +9041,19 @@ class WaPruneEvents extends Command
 }
 ```
 
-- [ ] **Step 4: Register the schedule** — append to `routes/console.php` (the file currently contains only the framework's `ping` closure):
+- [ ] **Step 4: Register the schedule** — appended to `routes/console.php` (shipped file; the file
+contains the framework's **inspire** closure — the original step said "ping", corrected):
 
 ```php
+<?php
+
+use Illuminate\Foundation\Inspiring;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
+
+Artisan::command('inspire', function () {
+    $this->comment(Inspiring::quote());
+})->purpose('Display an inspiring quote');
 
 Schedule::command('wa:prune-events')->dailyAt('03:10');
 Schedule::command('queue:work --stop-when-empty --max-time=50')->everyMinute()->withoutOverlapping();
@@ -9001,7 +9065,10 @@ Verify it registered:
 php artisan schedule:list
 ```
 
-Expected: two lines, `wa:prune-events` at 03:10 and the queue worker every minute.
+Measured: `10 3 * * *  php artisan wa:prune-events` and
+`* * * * *  php artisan queue:work --stop-when-empty --max-time=50`. The schedule only RUNS where a
+cron calls `schedule:run` — host cron is Task 16's checklist; with the owner's open QUEUE_CONNECTION
+decision, `sync` makes the drain a harmless no-op.
 
 - [ ] **Step 5: Run the full suite and the style check**
 
@@ -9010,17 +9077,35 @@ php artisan test
 php vendor/bin/pint --test
 ```
 
-Expected: every test passes; Pint reports no issues. If Pint asks to rewrite files, run `php vendor/bin/pint` once and commit the result separately as `style: pint`.
+Measured: suite **307 passed (807 assertions)** before AND after the Pint rewrite (behaviour
+unchanged); `pint --test` PASS, 64 files. The rewrite touched 34 closed files and is committed
+separately as `style: pint` per the plan; all 27 whole-file plan fences were remapped to post-Pint
+bytes and re-verified (R55/P3).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Commit** (feat first, style second — the original list is the feat commit):
 
 ```bash
 git add app/Console/Commands/WaPruneEvents.php routes/console.php tests/Feature/PruneEventsTest.php
 git commit -m "feat: event retention, scheduled queue drain, clean style and suite"
+git add <the 34 Pint-only paths>
+git commit -m "style: pint"
 ```
 
----
+**R55 review record.** Inline 13-arm battery (`Temp/t14arms/arms.mjs`, `results.json`, logs
+B1–B13), whole suite (307 rows) per arm: **13/13 killed, 0 green**, every arm occ=1 / landed=true /
+restored=true (bytes+sha256), every kill-set verified to hit only intended rows: B1 days-guard →
+both refused cases; B2 filter flipped → retention + custom; B3 --days ignored → custom + both
+refused cases; B4 delete line removed → retention + custom; B5 counter zeroed → retention +
+custom (output copy); B6/B7 schedule line deleted → schedule row; B8 03:10→04:10, B9
+withoutOverlapping removed, B10 max-time 50→60, B11 --stop-when-empty removed → schedule row;
+B12 error copy changed → both refused cases; B13 summary copy changed → retention + custom.
+Unwitnessed residuals (R42, recorded): the exactly-30-days boundary (the 29/45 pair brackets it);
+`--days=abc` casts to 0 and is refused by the same guard (no separate row); the CONFIG read is
+not independently witnessed — the retention row sets 30, equal to the default, so hardcoding 30
+stays green (B3 witnesses the option path only); chunk size 500 is structural. Full record:
+`.superpowers/sdd/2026-11-06-wa-webhook-inbox/task-14-report.md`. **Task 15's baseline is 307 (807).**
 
+---
 ## Task 15: Make the send bench fail closed on the suppression list
 
 **Deliverable:** the Python bench consults the inbox app before every send, refuses opted-out numbers, and refuses everything if the suppression list cannot be fetched. It also reports each accepted send back to the inbox.

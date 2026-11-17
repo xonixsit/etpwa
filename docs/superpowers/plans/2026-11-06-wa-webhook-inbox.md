@@ -9113,7 +9113,7 @@ stays green (B3 witnesses the option path only); chunk size 500 is structural. F
 **Consumes:** `GET /wa/suppressions`, `POST /inbound/record-send` (Task 10), both with `Authorization: Bearer <WA_EXPORT_TOKEN>`.
 **Produces in `C:\Users\Hp\Documents\Qoder\2026-10-08\21238e53\sender_server.py`:** `fetch_suppressions()`, `suppressions(force=False)`, `record_send(to, template, lang, msg_id)`, a fifth `blocked` parameter on `check_gates()`, and three new keys in `/api/state`.
 
-- [ ] **Step 1: Write the failing test** — `C:\Users\Hp\Documents\Qoder\2026-10-08\21238e53\test_suppression_gate.py`. These tests patch every network call and every log write, so nothing is sent and `send_log.csv` is untouched.
+- [x] **Step 1: Write the failing test** — `C:\Users\Hp\Documents\Qoder\2026-10-08\21238e53\test_suppression_gate.py`. These tests patch every network call and every log write, so nothing is sent and `send_log.csv` is untouched.
 
 ```python
 """Suppression gate tests for sender_server. Run: python -m unittest -v test_suppression_gate"""
@@ -9272,18 +9272,22 @@ both invisible to a green run:
    read and pass. Asserted per request now, with the request count pinned so a silently missing call
    cannot hide behind a header that happens to be right.
 
-These are plan-code corrections; neither is verified by a run yet, because Task 15 is not implemented.
-Step 1's own expected result is a RED suite, so the first execution of this file confirms or refutes both.
+These are plan-code corrections, now verified by runs: the RED suite failed exactly as Step 2 predicts,
+and after implementation both corrections are witnessed by mutation arms -- A4/A9 kill
+`test_the_suppression_list_beats_the_allow_list` when the blocked check or its reason copy is mutated,
+and A10 (drop the bearer header from `record-send` only) kills `test_allowed_number_sends_and_is_recorded`,
+which the old merged-dict assertion would have survived.
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 ```bash
 cd /c/Users/Hp/Documents/Qoder/2026-10-08/21238e53 && python -m unittest -v test_suppression_gate
 ```
 
 Expected: FAIL — `module 'sender_server' has no attribute 'INBOX_URL'` in `setUp`.
+Measured 2026-11-17: `Ran 7 tests ... FAILED (errors=7)`, every error the predicted `AttributeError` in `setUp`.
 
-- [ ] **Step 3: Add the constants.** In `sender_server.py`, after `HEADER_IMAGE = {...}` (line 41-43) and before `LOCK = threading.Lock()` (line 45), insert:
+- [x] **Step 3: Add the constants.** In `sender_server.py`, after `HEADER_IMAGE = {...}` (line 41-43) and before `LOCK = threading.Lock()` (line 45), insert:
 
 ```python
 # The inbox app holds the opt-out truth. If it cannot be reached, nothing is sent.
@@ -9298,7 +9302,7 @@ and next to the other caches on line 46 (`_tpl_cache = ...`) add:
 _suppressions = {"at": 0.0, "numbers": None}
 ```
 
-- [ ] **Step 4: Add the three functions** after `graph(...)` (which ends on line 79), before `load_templates()`:
+- [x] **Step 4: Add the three functions** after `graph(...)` (which ends on line 79), before `load_templates()`:
 
 ```python
 # ------------------------------------------------------------- suppression list
@@ -9344,7 +9348,7 @@ def record_send(to, template, lang, msg_id):
         return "inbox record failed: %s" % e
 ```
 
-- [ ] **Step 5: Widen `check_gates`** (currently lines 255-265). Replace the whole function with:
+- [x] **Step 5: Widen `check_gates`** (currently lines 255-265). Replace the whole function with:
 
 ```python
 def check_gates(to, allowed, used, in24, blocked=frozenset()):
@@ -9371,7 +9375,7 @@ seconds so a warm-up burst pays it once. Do not "optimise" it by moving the fetc
 check: then a number that is not allow-listed short-circuits, and the first-draft bug -- a `blocked` set
 that silently stayed empty -- becomes invisible instead of costly.
 
-- [ ] **Step 6: Gate `send_one`** (currently lines 268-287). Replace its body with:
+- [x] **Step 6: Gate `send_one`** (currently lines 268-287). Replace its body with:
 
 ```python
 def send_one(tpl, to, name, extras):
@@ -9407,7 +9411,7 @@ def send_one(tpl, to, name, extras):
 
 `/api/batch` needs no change: it calls `send_one` per row, and the suppression cache means one HTTP call for the whole batch.
 
-- [ ] **Step 7: Show the state.** In `do_GET`'s `/api/state` handler, replace the whole `return self.reply(200, {...})` block (lines 335-346) with the following. The suppression fetch is wrapped so the page still loads when the inbox is down, while `send_one` keeps failing closed:
+- [x] **Step 7: Show the state.** In `do_GET`'s `/api/state` handler, replace the whole `return self.reply(200, {...})` block (lines 335-346) with the following. The suppression fetch is wrapped so the page still loads when the inbox is down, while `send_one` keeps failing closed:
 
 ```python
                 try:
@@ -9432,39 +9436,109 @@ def send_one(tpl, to, name, extras):
                 })
 ```
 
-- [ ] **Step 8: Run the tests**
+- [x] **Step 8: Run the tests**
 
 ```bash
 cd /c/Users/Hp/Documents/Qoder/2026-10-08/21238e53 && python -m unittest -v test_suppression_gate
 ```
 
-Expected: 7 passed.
+Expected: 7 passed. Measured 2026-11-17: `Ran 7 tests ... OK`, and again after the mutation battery restored the file.
 
-- [ ] **Step 9: Prove the fail-closed behaviour against a dead inbox** (nothing is sent — this only asserts the refusal, and it writes one `refused` line into `send_log.csv`, which is the honest record):
+- [x] **Step 9: Prove the fail-closed behaviour against a dead inbox — R56 direct probe, NOT the HTTP probe.**
+
+**R56 (2026-11-17): the first-draft probe below was forbidden and was replaced.** It started the bench and
+POSTed to `/api/send`, but that handler calls `find_template()` → `load_templates()`, which on a cold cache
+makes a **live Graph API GET** to Meta — a violation of the standing no-live-Meta rule for tests and probes,
+even though the send itself would have been refused. The replacement calls `send_one()` directly in a fresh
+Python process with a local template dict, `SENDER_INBOX` pointed at a dead port, and both `graph()` and
+`token()` patched to raise `AssertionError` if touched — so the probe proves fail-closed with **zero Meta
+calls and zero token reads**, no server on 8765, and exactly one honest `refused` row in `send_log.csv`:
 
 ```bash
-cd /c/Users/Hp/Documents/Qoder/2026-10-08/21238e53
-SENDER_INBOX=http://127.0.0.1:9 SENDER_INBOX_TOKEN=x python sender_server.py &
-sleep 1
-curl -s -X POST http://127.0.0.1:8765/api/send -H 'Content-Type: application/json' \
-  -d '{"template":"etp_welcome_c","to":"18479043315","name":"Sam"}'
+cd /c/Users/Hp/Documents/Qoder/2026-10-08/21238e53 && python - <<'EOF'
+import io, json, os, sys
+os.environ["SENDER_INBOX"] = "http://127.0.0.1:9"
+os.environ["SENDER_INBOX_TOKEN"] = "probe-token"
+sys.path.insert(0, ".")
+import sender_server as s
+
+def no_meta(*a, **k):
+    raise AssertionError("graph() reached - probe would have called Meta")
+s.graph = no_meta
+
+def no_token():
+    raise AssertionError("token() reached - probe would have read wa_token.txt")
+s.token = no_token
+
+TPL = {"name": "etp_welcome_c", "language": "en_US", "variables": 0,
+       "firstIsName": False, "components": {}}
+res = s.send_one(TPL, "18479043315", None, None)
+print("probe result:", json.dumps(res))
+assert res["ok"] is False and res["status"] == "refused"
+assert "suppression list unreachable" in res["error"]
+with io.open("send_log.csv", encoding="utf-8") as f:
+    rows = f.read().splitlines()
+assert len(rows) == 11, "expected exactly one new refused row"
+assert ",refused," in rows[-1] and "suppression list unreachable" in rows[-1]
+print("R56 PROBE PASS: fail-closed, zero Meta calls, one honest refused log row")
+EOF
 ```
 
-Expected JSON contains `"status":"refused"` and an `error` naming the suppression list. Then stop that server (`Get-NetTCPConnection -LocalPort 8765 | ForEach-Object { Stop-Process -Id $_.OwningProcess }` in PowerShell, or `kill %1` in bash) and note in the commit message that a refused row was written by the probe.
+Measured 2026-11-17: log rows 10 → 11; result
+`{"ok": false, "to": "18479043315", "status": "refused", "error": "send refused: suppression list unreachable (<urlopen error [WinError 10061] ...>)"}`;
+new row `2026-11-17T15:40:07Z,18479043315,etp_welcome_c,en_US,refused,,send refused: suppression list unreachable (...)`.
+Neither patched guard fired. (The row-count assertion is pinned to this one execution; a re-run later
+must re-snapshot the count first.)
 
-- [ ] **Step 10: Keep the bench change with the plan.** The bench directory is not a git repository, so the Python diff is copied into the Laravel repo for the record:
+- [x] **Step 10: Keep the bench change with the plan.** The bench directory is not a git repository, so the Python files are copied into the Laravel worktree for the record and committed on the feature branch (not master — master receives them through the task merge):
 
 ```bash
-mkdir -p /d/etp-wa-inbox/docs/bench
+mkdir -p /d/etp-wa-inbox/.worktrees/wa-inbox/docs/bench
 cp /c/Users/Hp/Documents/Qoder/2026-10-08/21238e53/sender_server.py \
    /c/Users/Hp/Documents/Qoder/2026-10-08/21238e53/test_suppression_gate.py \
-   /d/etp-wa-inbox/docs/bench/
-cd /d/etp-wa-inbox
-git add docs/bench
-git commit -m "feat(bench): fail-closed suppression gate and send recording"
+   /d/etp-wa-inbox/.worktrees/wa-inbox/docs/bench/
+git -C /d/etp-wa-inbox/.worktrees/wa-inbox add docs/bench/sender_server.py docs/bench/test_suppression_gate.py
+git -C /d/etp-wa-inbox/.worktrees/wa-inbox commit -m "feat: send bench fail-closed suppression gate (Task 15 snapshot)"
 ```
 
+Measured 2026-11-17: both copies sha256-identical to the live files
+(`sender_server.py` `a32b9e204c4c1b51...`, `test_suppression_gate.py` `a2b795faf4a0f623...`);
+commit `f2de0df` on `wa-webhook-inbox`, 2 files, 616 insertions.
 The copies are snapshots for review, not the running code: the live bench remains `C:\Users\Hp\Documents\Qoder\2026-10-08\21238e53\sender_server.py`.
+
+**Task 15 completion record (2026-11-17, R56).** Executed inline (no independent subagent review was
+performed — agent dispatch unavailable; same verification criteria applied sequentially). All seven plan
+fences verified byte-exact against the shipped files (both LF-only). Mutation battery: 10 arms, whole
+7-test suite per arm, exact-string replace with occ=1, mutation proven landed by re-read, file restored
+in `finally` proven by byte-equality + sha256 after every arm — **10/10 killed with exact expected
+kill-sets** (harness `Temp/t15arms/arms.mjs`, logs and `results.json` beside it):
+
+| Arm | Mutation | Killed |
+|-----|----------|--------|
+| A1 | `fetch_suppressions` returns `set()` when `SENDER_INBOX` unset | no-inbox-url |
+| A2 | cache freshness comparison never true | cached-60s |
+| A3 | cache timestamp never stamped (`"at": 0.0`) | cached-60s |
+| A4 | `if to in blocked:` → `if False:` | opted-out, beats-allow-list |
+| A5 | unreachable-list refusal replaced by `blocked = frozenset()` (fail-open) | unreachable, no-inbox-url |
+| A6 | `record_send` failure re-raised instead of reported | record-failure |
+| A7 | `record_send` never called after an accepted send | allowed-sends, record-failure |
+| A8 | suppressions fetch loses bearer header | allowed-sends |
+| A9 | suppression refusal reason names `test_numbers.txt` instead | opted-out, beats-allow-list |
+| A10 | record-send loses bearer header (R44 per-request arm) | allowed-sends |
+
+Honest residuals (not witnessed, recorded rather than papered over): the `digits(line)` normalisation in
+`fetch_suppressions` (fixtures already use plain digits, so stripping it changes nothing observable);
+cache expiry after `SUPPRESSION_TTL` (no test advances the clock); the `not msg_id` early return in
+`record_send`; the three new `/api/state` keys and their unreachable-inbox note (no HTTP-level test;
+`sender.html` does not display them yet); the check-ordering inside `check_gates` (with the number on
+both lists, any order refuses with the suppression reason, so ordering is not mutation-observable —
+the fetch-first ordering in `send_one` IS witnessed by A5).
+
+**Behaviour change the owner must know:** with `SENDER_INBOX` unset the bench now refuses **every** send.
+To send again, the inbox app must be running and the bench environment must set `SENDER_INBOX` (the app's
+base URL) and `SENDER_INBOX_TOKEN` (the app's `WA_EXPORT_TOKEN` value, copied by the owner into the bench
+environment — never through chat, never by reading `.env` aloud). This is the fail-closed policy the
+owner confirmed on 2026-11-16.
 
 ---
 

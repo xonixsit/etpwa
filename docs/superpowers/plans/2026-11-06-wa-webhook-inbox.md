@@ -9544,6 +9544,16 @@ owner confirmed on 2026-11-16.
 
 ## Task 16: Deploy, subscribe the webhook, live acceptance
 
+**Owner parameters confirmed 2026-11-17 (owner-decisions addendum #8-#10), superseding the template
+values below:** subdomain **wa.xonixs.com** (every `inbox.etaxplanner.com` URL in this task's fences is
+replaced by it in the handoff), `QUEUE_CONNECTION=database` + the every-minute cron (the old "recommend
+sync" note is superseded by R28/R31's measurement), and the bad-signature `Log::warning` shipped as R57
+(`3a0332b`, merged `0273ee0`; baseline 308/810). The owner-facing execution package is
+**`docs/GO-LIVE.md`** — Parts 0-7 carry the confirmed values, the prerequisite check that xonixs.com's
+host meets the measured etaxplanner.com hosting facts, the fresh-token-first ordering, the bench hookup,
+the demo cleanup, the eleven acceptance lines and the R47 sign-off table. This task remains
+owner-executed; nothing in it is automated.
+
 **Deliverable:** the subdomain serves the app over HTTPS, Meta's callbacks arrive and are stored, a reply from a handset appears in the inbox and can be answered, and STOP silences the bench. Everything here is performed by the account owner; nothing in this task is automated, and each live step sends a real message to a real number.
 
 - [ ] **Step 1: Write down the deploy record** — create `docs/DEPLOY.md` with these fields filled in by whoever deploys. Values are typed into the host's `.env`, never pasted into chat:

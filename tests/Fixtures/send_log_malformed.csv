@@ -1,0 +1,6 @@
+utc_time,to,template,language,status,message_id,error
+2026-11-05T14:03:11Z,123456789012345678901,etp_welcome_c,en,sent,wamid.TOO_LONG,
+2026-11-05T14:04:00Z,123456789,etp_welcome_c,en,sent,wamid.TOO_SHORT,
+2026-11-05T14:05:00Z,18479043315,etp_welcome_c,en,sent,wamid.REPEAT_A,
+2026-11-06T14:05:00Z,18479043315,etp_welcome_c,en,sent,wamid.REPEAT_B,
+2026-11-05T14:06:00Z,18479043315,etp_welcome_c,en,failed,wamid.FAILED_ROW,bench refusal carrying an id

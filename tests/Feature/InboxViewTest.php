@@ -498,4 +498,13 @@ class InboxViewTest extends TestCase
         $this->assertStringContainsString('+&lt;b&gt;15551234567&lt;/b&gt;', $content);
         $this->assertStringNotContainsString('+<b>15551234567</b>', $content);
     }
+
+    // V7 (R50 carry, shipped by R54): the csrf-token meta tag in the layout had no witness -- its
+    // consumer is Task 13-era JavaScript per R50, and no JS ships yet, so this row pins the tag only.
+    // Kills the arm that deletes <meta name="csrf-token"> from resources/views/layout.blade.php.
+    public function test_the_layout_carries_the_csrf_token_meta_tag()
+    {
+        $this->get('/inbox')->assertOk()
+            ->assertSee('<meta name="csrf-token" content="', false);
+    }
 }

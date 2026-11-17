@@ -1,0 +1,5 @@
+utc_time,to,template,language,status,message_id,error
+2026-11-05T14:03:11Z,18479043315,etp_opener_brand,en,sent,wamid.BENCH_A,
+2026-11-05T14:05:02Z,19014307897,etp_welcome_c,en_US,sent,wamid.BENCH_B,
+2026-11-06T09:00:00Z,15559998888,etp_welcome_a,en_US,refused,,15559998888 is not in test_numbers.txt
+

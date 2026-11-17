@@ -2,6 +2,9 @@
 @section('content')
 <p class="muted"><a href="/inbox">All contacts</a></p>
 <h2 style="margin:0">{{ $contact->display_name() }} <span class="muted">+{{ $contact->phone }}</span></h2>
+@if (session('result'))
+  <div class="ok">{{ session('result') }}</div>
+@endif
 <p class="muted">
   {{ $contact->isOptedOut() ? 'OPTED OUT (' . $contact->opt_out_source . ' ' . $contact->opted_out_at?->toDayDateTimeString() . ')' : ($contact->windowOpen() ? 'reply window open' : 'reply window closed - approved template required') }}
 </p>

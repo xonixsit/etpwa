@@ -12,7 +12,8 @@ class WhatsAppSender
     {
     }
 
-    public function sendText(string $phone, string $text, bool $autoReply = false): WaMessage
+    public function sendText(string $phone, string $text, bool $autoReply = false,
+                             bool $allowSuppressed = false): WaMessage
     {
         return $this->post(
             ['messaging_product' => 'whatsapp', 'to' => $phone, 'type' => 'text',
@@ -20,11 +21,13 @@ class WhatsAppSender
             $phone,
             ['direction' => WaMessage::OUT, 'type' => 'text', 'body' => $text,
              'auto_reply' => $autoReply],
+            $allowSuppressed,
         );
     }
 
     public function sendTemplate(string $phone, string $name, string $lang,
-                                 array $variables = [], bool $autoReply = false): WaMessage
+                                 array $variables = [], bool $autoReply = false,
+                                 bool $allowSuppressed = false): WaMessage
     {
         $components = [];
         $image = (string) (config('whatsapp.header_images')[$name] ?? '');
@@ -48,6 +51,7 @@ class WhatsAppSender
             $phone,
             ['direction' => WaMessage::OUT, 'type' => 'template', 'template_name' => $name,
              'template_lang' => $lang, 'auto_reply' => $autoReply],
+            $allowSuppressed,
         );
     }
 
@@ -62,7 +66,8 @@ class WhatsAppSender
         return mb_substr($s, 0, $max);
     }
 
-    private function post(array $payload, string $phone, array $attrs): WaMessage
+    private function post(array $payload, string $phone, array $attrs,
+                          bool $allowSuppressed = false): WaMessage
     {
         // R35: the contact row and the payload have to agree. fromPhone() normalises internally, so
         // the first draft stored digits while sending the caller's punctuation -- Meta answers that
@@ -70,6 +75,17 @@ class WhatsAppSender
         // at the outbound direction.
         $phone = WaContact::digitsOnly($phone);
         $payload['to'] = $phone;
+
+        // D1: the suppression gate. Fresh read by the NORMALISED phone, no contact creation, no row
+        // write and no HTTP attempt before it. Throws instead of recording a FAILED row because the
+        // refuse-tests assert zero OUT rows. allowSuppressed is the ONE exemption: the opt-out
+        // confirmation the AutoResponder owes the contact after a STOP. TOCTOU: a concurrent opt-out
+        // between this read and the send can slip one message; the plan sanctions accepting the race
+        // (recorded in the ledger).
+        $gateContact = WaContact::where('phone', $phone)->first();
+        if (!$allowSuppressed && $gateContact?->isOptedOut()) {
+            throw new SuppressedContactException();
+        }
 
         $contact = WaContact::fromPhone($phone);
         $token = (string) config('whatsapp.token', '');

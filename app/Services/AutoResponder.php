@@ -27,13 +27,11 @@ class AutoResponder
             $contact->optOut('inbound_keyword');
             $text = (string) config('whatsapp.opt_out_text', '');
             if (!$wasSilenced && $text !== '') {
-                $this->sender->sendText($contact->phone, $text, autoReply: true);
+                // D1: the ONE exemption to the sender's suppression gate -- the confirmation the
+                // suppression regime owes the contact after their own STOP.
+                $this->sender->sendText($contact->phone, $text, autoReply: true, allowSuppressed: true);
             }
 
-            return;
-        }
-
-        if ($contact->isOptedOut()) {
             return;
         }
 
@@ -68,6 +66,16 @@ class AutoResponder
             return;
         }
 
-        $this->sender->sendText($contact->phone, $text, autoReply: true);
+        // D1/F5b: the sender's gate is the single enforcement point for suppression; this catch is the
+        // single translation point. The pre-check that used to sit in handle() is gone -- keeping it
+        // would make this catch un-witnessable (R51 X01 joint redundancy). ProcessInboundEvent has no
+        // try/catch and $tries = 3, so an escaping throw would retry the job three times. Known side
+        // effect: an opted-out contact consumes the R46 cache key above before the gate refuses;
+        // harmless, no send, and the key expires with the window.
+        try {
+            $this->sender->sendText($contact->phone, $text, autoReply: true);
+        } catch (SuppressedContactException) {
+            return;
+        }
     }
 }

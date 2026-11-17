@@ -85,6 +85,13 @@ Deployed code: the committed `master` tree at commit `0273ee0` or later.
    Note: the webhook table's `body_hash` column was added by editing an already-applied
    migration, so on a fresh host `migrate` creates it correctly — but `migrate:status` on a
    host that somehow ran the old file would not show it as pending. Fresh host: no issue.
+   Note (R59, 2026-11-17): this host's MySQL caps InnoDB index keys at 767 bytes, so the app
+   now defaults string columns to 191 chars (`AppServiceProvider::boot`). If a migrate run
+   already failed with `SQLSTATE[42000] ... 1071 Specified key was too long`, it left a
+   half-created `users` table behind: pull the latest master first, then run
+   `php artisan migrate:fresh --force` **instead of** `migrate --force`. `migrate:fresh`
+   DROPS EVERY TABLE in the database — correct here only because the database is brand new
+   and holds no data yet. Never run it once real messages exist.
 7. **Timezone check** (the app pins UTC; if the host ignores the pin every timestamp is offset):
    ```bash
    php artisan tinker --execute="echo now()->toDateTimeString(), ' | ', DB::selectOne('select now() x')->x;"

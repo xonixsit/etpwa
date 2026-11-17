@@ -9564,6 +9564,17 @@ pins both full texts (RED reproduced the exact host exception; suite 309 passed 
 A host that copied `.env.example` before this fix must wrap both values in double quotes in its
 `.env` and re-run `php artisan config:cache`.
 
+**R59 (2026-11-17, second host blocker — fixed):** `migrate --force` on the host died with
+`SQLSTATE[42000] ... 1071 Specified key was too long; max key length is 767 bytes` on
+`users_email_unique`. The host's MySQL caps InnoDB index keys at 767 bytes (local MariaDB 10.4
+allows 3072 and never showed it); utf8mb4 × Laravel's 255-char default = 1020 bytes. Fix:
+`Schema::defaultStringLength(191)` in `AppServiceProvider::boot()` (191 × 4 = 764), witnessed by
+`tests/Feature/SchemaDefaultLengthTest.php` (RED: "Failed asserting that 255 is identical to 191";
+suite 310 passed / 813 assertions). Commits `f17d08a`, merged `6623178`. The failed run left a
+half-created `users` table on the host, so the owner's re-run is `migrate:fresh --force` on the
+still-empty database — GO-LIVE Part 1 step 6 carries the warning that this drops every table and
+must never run once real data exists.
+
 **Deliverable:** the subdomain serves the app over HTTPS, Meta's callbacks arrive and are stored, a reply from a handset appears in the inbox and can be answered, and STOP silences the bench. Everything here is performed by the account owner; nothing in this task is automated, and each live step sends a real message to a real number.
 
 - [ ] **Step 1: Write down the deploy record** — create `docs/DEPLOY.md` with these fields filled in by whoever deploys. Values are typed into the host's `.env`, never pasted into chat:

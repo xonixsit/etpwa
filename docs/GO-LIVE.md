@@ -73,7 +73,7 @@ Deployed code: the committed `master` tree at commit `0273ee0` or later.
    | `WA_VERIFY_TOKEN` | a **fresh** random string you invent now (the old one leaked). You will paste the same value into Meta's console in Part 3. |
    | `WA_EXPORT_TOKEN` | another fresh random string. The laptop bench will use it in Part 4. |
    | `WA_MY_NUMBER` | `12242144261` (already the default — keep it; with it empty, our own outbound traffic is filed as inbound against our own number) |
-   | `WA_ACK_TEXT` / `WA_OPT_OUT_TEXT` | keep the defaults or edit the wording. **Do not leave `WA_OPT_OUT_TEXT` empty**: an empty value still suppresses the client but sends no confirmation — silenced clients who were never told. |
+   | `WA_ACK_TEXT` / `WA_OPT_OUT_TEXT` | keep the defaults or edit the wording. Any value containing spaces must be wrapped in double quotes (the shipped example was fixed 2026-11-17; if you copied it before that fix, add the quotes or artisan fails with "environment file is invalid"). **Do not leave `WA_OPT_OUT_TEXT` empty**: an empty value still suppresses the client but sends no confirmation — silenced clients who were never told. |
 
    To invent a random string on the server: `php -r "echo bin2hex(random_bytes(24)), PHP_EOL;"`
 6. Still over SSH:

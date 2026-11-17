@@ -106,8 +106,8 @@ WA_VERIFY_TOKEN=
 WA_EXPORT_TOKEN=
 WA_TEMPLATE_CHOICES=etp_opener_brand,etp_welcome_c,etp_welcome_a,filing_deadline_reminder
 WA_HEADER_IMAGE_ETP_OPENER_BRAND=https://www.etaxplanner.com/assets/images/logo/etaxplanner_logo.png
-WA_ACK_TEXT=Thanks for your message. A human from E Tax Planner will reply here within one business day.
-WA_OPT_OUT_TEXT=You will not receive any more messages from E Tax Planner on this number.
+WA_ACK_TEXT="Thanks for your message. A human from E Tax Planner will reply here within one business day."
+WA_OPT_OUT_TEXT="You will not receive any more messages from E Tax Planner on this number."
 ```
 
 `WA_ACCESS_TOKEN` stays empty in `.env` for now. The local app does not need it until a live send is tested; it is filled at deploy time by the account owner, from the same token file the bench reads.
@@ -230,8 +230,8 @@ WA_VERIFY_TOKEN=
 WA_EXPORT_TOKEN=
 WA_TEMPLATE_CHOICES=etp_opener_brand,etp_welcome_c,etp_welcome_a,filing_deadline_reminder
 WA_HEADER_IMAGE_ETP_OPENER_BRAND=https://www.etaxplanner.com/assets/images/logo/etaxplanner_logo.png
-WA_ACK_TEXT=Thanks for your message. A human from E Tax Planner will reply here within one business day.
-WA_OPT_OUT_TEXT=You will not receive any more messages from E Tax Planner on this number.
+WA_ACK_TEXT="Thanks for your message. A human from E Tax Planner will reply here within one business day."
+WA_OPT_OUT_TEXT="You will not receive any more messages from E Tax Planner on this number."
 ```
 
 Also set `DB_CONNECTION=mysql`, `DB_HOST=127.0.0.1`, `DB_PORT=3306`, `DB_DATABASE=etp_wa_inbox`,
@@ -9553,6 +9553,16 @@ sync" note is superseded by R28/R31's measurement), and the bad-signature `Log::
 host meets the measured etaxplanner.com hosting facts, the fresh-token-first ordering, the bench hookup,
 the demo cleanup, the eleven acceptance lines and the R47 sign-off table. This task remains
 owner-executed; nothing in it is automated.
+
+**R58 (2026-11-17, host deploy blocker — fixed):** the owner's first host run died with
+`InvalidFileException: Failed to parse dotenv file. Encountered unexpected whitespace at [Thanks for
+your message...]`. Root cause: Task 1's fences shipped `WA_ACK_TEXT` / `WA_OPT_OUT_TEXT` as unquoted
+values containing spaces, which phpdotenv rejects; `cp .env.example .env` inherited the defect. Both
+fences above are re-synced with double quotes, `.env.example` is fixed (`0bf4c6c`, merged `9446c1c`),
+and `tests/Feature/EnvExampleTest.php` now parses the tracked example with the app's own parser and
+pins both full texts (RED reproduced the exact host exception; suite 309 passed / 812 assertions).
+A host that copied `.env.example` before this fix must wrap both values in double quotes in its
+`.env` and re-run `php artisan config:cache`.
 
 **Deliverable:** the subdomain serves the app over HTTPS, Meta's callbacks arrive and are stored, a reply from a handset appears in the inbox and can be answered, and STOP silences the bench. Everything here is performed by the account owner; nothing in this task is automated, and each live step sends a real message to a real number.
 

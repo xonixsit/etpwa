@@ -2,7 +2,9 @@
 
 namespace Tests\Feature;
 
+use App\Models\WaContact;
 use App\Models\WaMessage;
+use App\Services\SuppressedContactException;
 use App\Services\WhatsAppSender;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
@@ -181,5 +183,75 @@ class WhatsAppSenderTest extends TestCase
         $this->assertSame(WaMessage::FAILED, $m->status);
         $this->assertSame('131047', $m->error_code);
         $this->assertSame(255, mb_strlen($m->error_title));
+    }
+
+    // ---- D1 gate witnesses (G1-G3). The rows above are the witness that a non-opted-out
+    // contact is unaffected; they are not duplicated here. ----
+
+    // G1: kills "gate deleted" (a send happens -> the stray guard fires) and "gate moved after
+    // record()" (a row exists). No stub: any HTTP attempt is a failure, not an answer.
+    public function test_send_text_to_an_opted_out_contact_throws_before_any_row_or_request()
+    {
+        WaContact::factory()->create(['phone' => '18479043315'])->optOut('manual');
+
+        try {
+            app(WhatsAppSender::class)->sendText('18479043315', 'x');
+            $this->fail('SuppressedContactException was not thrown');
+        } catch (SuppressedContactException $e) {
+            $this->assertSame('This contact has opted out. Nothing may be sent to this number.',
+                $e->getMessage());
+        }
+
+        $this->assertSame(0, WaMessage::count(), 'the gate refuses before any row write');
+        Http::assertNothingSent();
+    }
+
+    // G2: the same refusal for the template path.
+    public function test_send_template_to_an_opted_out_contact_throws_before_any_row_or_request()
+    {
+        WaContact::factory()->create(['phone' => '18479043315'])->optOut('inbound_keyword');
+
+        try {
+            app(WhatsAppSender::class)->sendTemplate('18479043315', 'etp_welcome_c', 'en_US');
+            $this->fail('SuppressedContactException was not thrown');
+        } catch (SuppressedContactException $e) {
+            $this->assertSame('This contact has opted out. Nothing may be sent to this number.',
+                $e->getMessage());
+        }
+
+        $this->assertSame(0, WaMessage::count(), 'the gate refuses before any row write');
+        Http::assertNothingSent();
+    }
+
+    // G3: kills "exemption flag ignored in the gate" -- the one send the suppression regime
+    // owes the contact must still go out and be recorded.
+    public function test_send_text_with_allow_suppressed_sends_and_records_for_an_opted_out_contact()
+    {
+        WaContact::factory()->create(['phone' => '18479043315'])->optOut('inbound_keyword');
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.EXEMPT1']]], 200)]);
+
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'You are opted out.',
+            autoReply: true, allowSuppressed: true);
+
+        $this->assertSame(WaMessage::SENT, $m->status);
+        $this->assertSame('wamid.EXEMPT1', $m->meta_id);
+        $this->assertTrue($m->auto_reply);
+        $this->assertSame(1, WaMessage::count());
+        Http::assertSent(fn ($r) => $r['to'] === '18479043315' && $r['text']['body'] === 'You are opted out.');
+    }
+
+    // G4 (R53): sendTemplate's allowSuppressed flag had no witness -- review arm V7 hard-coded
+    // false in its post() call and the suite stayed green (G3 only exercises sendText).
+    public function test_send_template_with_allow_suppressed_sends_and_records_for_an_opted_out_contact()
+    {
+        WaContact::factory()->create(['phone' => '18479043315'])->optOut('inbound_keyword');
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.EXEMPT2']]], 200)]);
+
+        $m = app(WhatsAppSender::class)->sendTemplate('18479043315', 'etp_welcome_c', 'en_US',
+            [], autoReply: true, allowSuppressed: true);
+
+        $this->assertSame(WaMessage::SENT, $m->status);
+        $this->assertSame('wamid.EXEMPT2', $m->meta_id);
+        $this->assertSame(1, WaMessage::count());
     }
 }

@@ -30,4 +30,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/', fn () => redirect('/inbox'))->name('home');
     Route::get('/inbox', [InboxController::class, 'contacts'])->name('inbox');
     Route::get('/inbox/{contact}', [InboxController::class, 'thread'])->name('inbox.thread');
+    Route::post('/inbox/{contact}/reply', [InboxController::class, 'reply'])->name('inbox.reply');
+    Route::post('/inbox/{contact}/template', [InboxController::class, 'template'])->name('inbox.template');
+    Route::post('/inbox/{contact}/opt-out', [InboxController::class, 'optOut'])->name('inbox.optout');
 });

@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -19,6 +20,8 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        //
+        // The Plesk host's MySQL caps InnoDB index keys at 767 bytes; utf8mb4 makes the
+        // default 255-char column 1020 bytes and migrate dies with SQLSTATE 1071 (R59).
+        Schema::defaultStringLength(191);
     }
 }

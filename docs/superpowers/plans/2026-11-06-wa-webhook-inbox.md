@@ -7974,16 +7974,49 @@ accepted race. **Task 13's baseline is 294 (749).**
 
 **Deliverable:** `wa:import-send-log` seeds `wa_contacts` and `wa_messages` from the bench's `send_log.csv`, is dry-run unless `--apply`, and running it twice changes nothing.
 
-**Consumes:** `WaContact::fromPhone()`, `WaMessage::record()`.
-**Produces:** `php artisan wa:import-send-log {path} {--apply}` printing counts; refused rows are counted as skipped and never become messages.
-**Carried from R48:** the import writes message rows that never went through `AutoResponder`, so no `wa-ack-<contact>` cache key
-stands behind them. That is the one state in which the 24-hour window query, and not `Cache::add`, decides whether a
-contact gets acknowledged -- Task 8's `test_an_earlier_inbound_stands_the_ack_down_even_with_an_empty_cache` pins it for a
-row two hours old. Neither guard is tested against a row **older** than the window whose key is still alive, because the
-key's TTL is anchored at `now()` while the query looks at `sent_at`; an import of a months-old send log is exactly how
-that shape appears. If this task can produce it, record that in its report rather than assuming Task 8 covered it.
+**Consumes:** `WaContact::fromPhone()` / `isDialable()` / `digitsOnly()`, `WaMessage::record()`.
+**Produces:** `php artisan wa:import-send-log {path} {--apply}` printing counts; refused AND undialable rows are counted as skipped and never become messages.
 
-- [ ] **Step 1: Create the fixture** `tests/Fixtures/send_log_sample.csv` (same columns as the real log; the third row is a refusal, the fourth a blank line):
+**R54 ruling — executed INLINE by the controller (no subagent types available after the credit
+limit); no independent subagent review was performed. Pre-flight: `task-13-preflight.md` (F1–F7);
+report: `task-13-report.md`.** Four corrections to the original fences, each measured:
+
+1. **F2 — the phone guard is `!WaContact::isDialable($phone)` → `$skipped++`, not `strlen < 10`
+   silent continue.** `fromPhone()` throws outside 10..20 digits (the column width, R29); a 21-digit
+   row passed the narrow guard, counted in the dry run, then crashed `--apply` mid-loop with partial
+   writes. Undialable rows are counted skipped, like refusals. Witness: arm A1 (narrow guard restored)
+   kills both malformed-fixture rows.
+2. **F3 — explicit blank-row guard `$row === [null]` before any counting.** `fgetcsv` returns
+   `[null]` for a blank line, not `false`; under F2's counting change the fixture's trailing blank
+   line would become a phantom skip. Witness: arm A2 kills the plan dry-run row. The malformed rows
+   live in a SECOND fixture so the plan fixture stays byte-exact (R43: do not strengthen the plan
+   fixture into the only witness).
+3. **D1 — one `expectsOutputToContain` per output line.** In this Laravel version each `doWrite`
+   call satisfies at most one substring expectation (PendingCommand.php:614-622: Mockery matches in
+   order and the first match consumes the call), so the original dry-run row's two stacked substrings
+   on ONE line were structurally unpassable — measured RED, root-caused in framework source. The
+   shipped rows pin the WHOLE line in one expectation (a stronger pin). The command's output fence
+   was not changed. This also answers pre-flight F6: `expectsOutputToContain('not found')` against
+   `$this->error()` DOES work in this harness.
+4. **F4 — Step 6 runs on a SCRATCH SQLITE database, never the demo MariaDB.** Jane Okafor's demo
+   number IS 18479043315, which appears twice in the real log; a local `--apply` would splice real
+   OUT rows into her approved demo thread. The MariaDB import of the real log is deferred to Task 16
+   on the host, where the production DB is empty and the history is wanted.
+
+**V7 (R50 carry) shipped here:** one row added to `InboxViewTest.php` pinning the layout's
+`<meta name="csrf-token"` tag (its consumer is Task 13-era JS per R50; no JS ships in this task —
+the row pins the tag only). Witness: arm A10. `InboxViewTest.php` is owned by this deviation only.
+
+**R48 carry answered (F5):** this importer CANNOT produce the stale-row + live-ack-key shape — it
+writes OUT rows only, the ack window query filters `direction = IN`, and `windowOpen()` reads
+`last_inbound_at`, which the import never sets. **R51 carry answered:** imported rows carry
+`status_at = NULL` (no receipt evidence — honest); same-file replay is truly idempotent (measured
+twice on scratch). The importer calls `WaMessage::record()` directly and NEVER the sender, so
+R53's gate is irrelevant here — "every caller inherits the gate" binds SENDING callers only.
+
+- [ ] **Step 1: Create the fixtures.** `tests/Fixtures/send_log_sample.csv` — byte-exact as
+originally fenced, INCLUDING the trailing blank line (it is the F3 witness; the file ends with two
+LFs):
 
 ```csv
 utc_time,to,template,language,status,message_id,error
@@ -7993,7 +8026,24 @@ utc_time,to,template,language,status,message_id,error
 
 ```
 
-- [ ] **Step 2: Write the failing test** — `tests/Feature/ImportSendLogTest.php`
+`tests/Fixtures/send_log_malformed.csv` — second fixture (F3/R43): 21-digit and 9-digit phones with
+wamids (F2), the same valid phone on two days (R43 distinct-count), and a `failed` row carrying an
+id (R43 status column). Dry run: 3 messages, 1 contacts, 2 skipped. The FAILED_ROW reuses
+18479043315 — an earlier draft gave it a second valid phone and the contacts assertion measured 2,
+not 1; fixed before GREEN, recorded in the report:
+
+```csv
+utc_time,to,template,language,status,message_id,error
+2026-11-05T14:03:11Z,123456789012345678901,etp_welcome_c,en,sent,wamid.TOO_LONG,
+2026-11-05T14:04:00Z,123456789,etp_welcome_c,en,sent,wamid.TOO_SHORT,
+2026-11-05T14:05:00Z,18479043315,etp_welcome_c,en,sent,wamid.REPEAT_A,
+2026-11-06T14:05:00Z,18479043315,etp_welcome_c,en,sent,wamid.REPEAT_B,
+2026-11-05T14:06:00Z,18479043315,etp_welcome_c,en,failed,wamid.FAILED_ROW,bench refusal carrying an id
+```
+
+- [ ] **Step 2: Write the failing test** — `tests/Feature/ImportSendLogTest.php` (shipped: 7 rows /
+33 assertions — the plan's 4 with the dry-run expectation fixed per D1, plus the malformed dry-run,
+malformed apply, and header-refusal rows):
 
 ```php
 <?php
@@ -8016,9 +8066,12 @@ class ImportSendLogTest extends TestCase
 
     public function test_dry_run_imports_nothing_but_reports_the_counts()
     {
+        // R54: ONE expectation pinning the whole line. In this Laravel version each doWrite call
+        // satisfies at most one expectsOutputToContain (PendingCommand's Mockery matcher consumes
+        // the call for the first matching substring), so the plan's two stacked substrings on this
+        // single output line could never both match -- measured, not guessed.
         $this->artisan('wa:import-send-log', ['path' => $this->path()])
-            ->expectsOutputToContain('DRY RUN')
-            ->expectsOutputToContain('2 messages, 2 contacts, 1 skipped')
+            ->expectsOutputToContain('DRY RUN: would import 2 messages, 2 contacts, 1 skipped')
             ->assertSuccessful();
 
         $this->assertSame(0, WaMessage::count());
@@ -8059,12 +8112,74 @@ class ImportSendLogTest extends TestCase
             ->assertExitCode(1);
         $this->assertSame(0, WaMessage::count());
     }
+
+    // ---- R54 witness rows (pre-flight F2/F3/F5; the malformed rows live in a SECOND fixture so the
+    // plan's four rows and their counts stay untouched, per R43's warning) ----
+
+    private function malformedPath(): string
+    {
+        return base_path('tests/Fixtures/send_log_malformed.csv');
+    }
+
+    // W-MALFORMED-DRY: kills the arm that narrows the phone guard back to strlen < 10 (a 21-digit
+    // phone passes it and crashes fromPhone() mid-apply) and the arm that counts contacts per row
+    // instead of by distinct phone (R43: the repeat number would print 3 contacts, not 1).
+    public function test_malformed_phones_are_counted_skipped_and_repeats_count_one_contact()
+    {
+        $this->artisan('wa:import-send-log', ['path' => $this->malformedPath()])
+            ->expectsOutputToContain('DRY RUN: would import 3 messages, 1 contacts, 2 skipped')
+            ->assertSuccessful();
+
+        $this->assertSame(0, WaMessage::count());
+        $this->assertSame(0, WaContact::count());
+    }
+
+    // W-MALFORMED-APPLY: the 21-digit and 9-digit rows must be skipped without a crash and without
+    // contacts; the wamid-carrying 'failed' row must import as FAILED, not SENT (R43 correction 2 --
+    // kills the arm that hardcodes SENT); the two repeats keep their own sent_at.
+    public function test_apply_skips_undialable_phones_and_reads_the_status_column()
+    {
+        $this->artisan('wa:import-send-log', ['path' => $this->malformedPath(), '--apply' => true])
+            ->assertSuccessful();
+
+        $this->assertSame(1, WaContact::count());
+        $this->assertSame(3, WaMessage::count());
+        $this->assertSame(0, WaContact::where('phone', '123456789012345678901')->count());
+        $this->assertSame(0, WaContact::where('phone', '123456789')->count());
+
+        $failed = WaMessage::where('meta_id', 'wamid.FAILED_ROW')->firstOrFail();
+        $this->assertSame(WaMessage::FAILED, $failed->status);
+
+        $this->assertSame('2026-11-05 14:05:00',
+            WaMessage::where('meta_id', 'wamid.REPEAT_A')->value('sent_at')->toDateTimeString());
+        $this->assertSame('2026-11-06 14:05:00',
+            WaMessage::where('meta_id', 'wamid.REPEAT_B')->value('sent_at')->toDateTimeString());
+    }
+
+    // W-HEADER: kills the arm that deletes the header check -- a CSV that is not a send log must be
+    // refused before any row is read, not imported through array_combine warnings.
+    public function test_a_file_without_the_send_log_header_is_refused()
+    {
+        $path = sys_get_temp_dir() . '/wa-not-a-log-' . getmypid() . '.csv';
+        file_put_contents($path, "name,phone\nJane,18479043315\n");
+        try {
+            $this->artisan('wa:import-send-log', ['path' => $path, '--apply' => true])
+                ->expectsOutputToContain('Not a send log')
+                ->assertExitCode(1);
+            $this->assertSame(0, WaMessage::count());
+            $this->assertSame(0, WaContact::count());
+        } finally {
+            unlink($path);
+        }
+    }
 }
 ```
 
-- [ ] **Step 3: Run it** — expected FAIL `Command "wa:import-send-log" is not defined`.
+- [ ] **Step 3: Run it** — measured RED: `7 failed (6 assertions)`, CommandNotFoundException, the
+predicted shape.
 
-- [ ] **Step 4: Create `app/Console/Commands/WaImportSendLog.php`**
+- [ ] **Step 4: Create `app/Console/Commands/WaImportSendLog.php`** (shipped file — the F2/F3 guards
+carry comments naming the measurement behind them):
 
 ```php
 <?php
@@ -8104,9 +8219,20 @@ class WaImportSendLog extends Command
         $apply = (bool) $this->option('apply');
 
         while (($row = fgetcsv($handle)) !== false) {
+            // R54/F3: fgetcsv returns [null] for a blank line, not false. Guard before any counting,
+            // or the plan fixture's trailing blank line becomes a phantom skip.
+            if ($row === [null]) {
+                continue;
+            }
+
             $row = array_combine($header, array_pad($row, count($header), null));
             $phone = WaContact::digitsOnly($row['to'] ?? '');
-            if (strlen($phone) < 10) {
+            // R54/F2: the guard is fromPhone()'s own predicate (10..20 digits, the column width),
+            // not strlen >= 10 -- a 21-digit phone passed the narrow guard and crashed --apply
+            // mid-loop with partial writes. Undialable rows are counted skipped, like refusals.
+            if (!WaContact::isDialable($phone)) {
+                $skipped++;
+
                 continue;
             }
 
@@ -8166,6 +8292,7 @@ failing test, which is why they are stated here instead of in a ruling about beh
    so repeats across days are the normal case, not an edge case. `$distinctPhones[$phone] = true` and
    `count($distinctPhones)` make the figure mean what the label says. The sample fixture uses two distinct
    numbers, so no test here can catch this -- do not "strengthen" the fixture into the only witness.
+   (The malformed fixture now DOES carry a repeat, per R54 — arm A4 kills the per-row count.)
 2. `'status' => WaMessage::SENT` hardcoded the outcome while the CSV has a `status` column. For the log as
    the bench writes it today the hardcoding is not wrong: `append_log()` writes a `message_id` only on the
    success path (sender_server.py:285), and every refusal path writes an empty id and is skipped by the
@@ -8174,7 +8301,523 @@ failing test, which is why they are stated here instead of in a ruling about beh
    id and a failed status must not be imported as a delivery. `'status' => ($row['status'] ?? '') === 'sent'
    ? WaMessage::SENT : WaMessage::FAILED` costs nothing and stops the importer from asserting an outcome it
    never verified -- the same rule R34 applied to reading Meta's response: decide at the reader, do not
-   assume downstream.
+   assume downstream. (Witnessed by the malformed fixture's FAILED_ROW — arm A3.)
+
+- [ ] **Step 4b: Add the V7 witness row** — `tests/Feature/InboxViewTest.php` (shipped file, 40 rows;
+the ONLY change owned by this task is the appended `test_the_layout_carries_the_csrf_token_meta_tag`):
+
+```php
+<?php
+
+namespace Tests\Feature;
+
+use App\Models\User;
+use App\Models\WaContact;
+use App\Models\WaMessage;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Route;
+use Illuminate\Support\MessageBag;
+use Illuminate\Support\ViewErrorBag;
+use Tests\TestCase;
+
+class InboxViewTest extends TestCase
+{
+    use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->actingAs(User::factory()->create());
+    }
+
+    // ---- the plan's five rows (Step 1 fence; D1: talking contact gets last_inbound_at) ----
+
+    public function test_list_shows_name_number_and_state()
+    {
+        $talking = WaContact::factory()->create(['phone' => '18479043315', 'profile_name' => 'Jane Tester',
+                                                 'last_inbound_at' => now()]);
+        WaMessage::factory()->create(['wa_contact_id' => $talking->id, 'direction' => WaMessage::IN,
+                                      'sent_at' => now(), 'body' => 'hello']);
+        WaContact::factory()->create(['phone' => '15550002222', 'profile_name' => 'Silent Sam'])->optOut('manual');
+
+        $this->get('/inbox')->assertOk()
+            ->assertSee('Jane Tester')->assertSee('+18479043315')
+            ->assertSee('Silent Sam')->assertSee('opted out')
+            ->assertSee('window open');
+    }
+
+    public function test_list_search_filters_by_phone_and_name()
+    {
+        WaContact::factory()->create(['phone' => '18479043315', 'profile_name' => 'Jane Tester']);
+        WaContact::factory()->create(['phone' => '19014307897', 'profile_name' => 'Bob Other']);
+
+        $this->get('/inbox?q=Bob')->assertSee('Bob Other')->assertDontSee('Jane Tester');
+        $this->get('/inbox?q=1847904')->assertSee('Jane Tester')->assertDontSee('Bob Other');
+    }
+
+    public function test_thread_shows_both_directions_and_marks_automatic_sends()
+    {
+        $c = WaContact::factory()->create(['phone' => '18479043315', 'profile_name' => 'Jane Tester']);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
+                                      'meta_id' => 'wamid.I1', 'body' => 'Is this E Tax Planner?',
+                                      'sent_at' => now()->subMinutes(30)]);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
+                                      'meta_id' => 'wamid.O1', 'type' => 'template',
+                                      'template_name' => 'etp_opener_brand', 'template_lang' => 'en',
+                                      'body' => 'Hi Jane, ...', 'status' => WaMessage::DELIVERED,
+                                      'auto_reply' => false, 'sent_at' => now()->subHour()]);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
+                                      'meta_id' => 'wamid.O2', 'auto_reply' => true, 'status' => WaMessage::SENT,
+                                      'body' => 'Thanks, a human will reply.', 'sent_at' => now()->subMinutes(20)]);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
+                                      'meta_id' => null, 'status' => WaMessage::FAILED,
+                                      'error_code' => '131030', 'error_title' => 'Re-engagement message',
+                                      'body' => 'late note', 'sent_at' => now()->subMinute()]);
+
+        $this->get('/inbox/' . $c->id)->assertOk()
+            ->assertSee('Is this E Tax Planner?')
+            ->assertSee('Jane Tester')
+            ->assertSee('delivered')
+            ->assertSee('automatic')
+            ->assertSee('FAILED 131030: Re-engagement message')
+            ->assertSee('etp_opener_brand')
+            ->assertSee('name="body"', false);
+    }
+
+    public function test_thread_of_an_image_message_shows_a_placeholder_not_a_crash()
+    {
+        $c = WaContact::factory()->create(['phone' => '18479043315']);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'type' => 'image', 'body' => null]);
+
+        $this->get('/inbox/' . $c->id)->assertOk()
+            ->assertSee('(image message - text not stored here)');
+    }
+
+    public function test_thread_404s_for_an_unknown_contact()
+    {
+        $this->get('/inbox/999')->assertNotFound();
+    }
+
+    // ---- witness rows added by the brief ----
+
+    public function test_list_shows_window_state_three_ways_and_prefers_opted_out()
+    {
+        WaContact::factory()->create(['phone' => '15550001111', 'profile_name' => 'Win Open',
+                                      'last_inbound_at' => now()]);
+        WaContact::factory()->create(['phone' => '15550002222', 'profile_name' => 'Window Stale',
+                                      'last_inbound_at' => now()->subHours(25)]);
+        WaContact::factory()->create(['phone' => '15550003333', 'profile_name' => 'Never One']);
+        WaContact::factory()->create(['phone' => '15550004444', 'profile_name' => 'Both States',
+                                      'last_inbound_at' => now()])->optOut('manual');
+
+        $content = $this->get('/inbox')->assertOk()->getContent();
+
+        $this->assertSame(1, substr_count($content, 'window open'));
+        $this->assertSame(2, substr_count($content, 'template only'));
+        $this->assertSame(1, substr_count($content, 'never replied'));
+        $this->assertSame(1, substr_count($content, 'opted out'));
+    }
+
+    public function test_list_shows_inbound_and_outbound_message_counts()
+    {
+        $c = WaContact::factory()->create(['phone' => '15550101010', 'profile_name' => 'Counted']);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN]);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT]);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT]);
+
+        $content = $this->get('/inbox')->assertOk()->getContent();
+
+        $this->assertStringContainsString('1 in / 2 out', $content);
+        $this->assertStringNotContainsString('page=', $content);
+    }
+
+    public function test_the_layout_logout_form_and_its_token_render_on_the_contact_list()
+    {
+        $content = $this->get('/inbox')->assertOk()->getContent();
+
+        $this->assertStringContainsString('action="/logout"', $content);
+        $this->assertStringContainsString('name="_token"', $content);
+    }
+
+    public function test_a_thread_page_carries_four_csrf_fields_for_its_three_forms_and_the_logout()
+    {
+        $c = WaContact::factory()->create(['phone' => '15550202020']);
+
+        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+
+        $this->assertSame(4, substr_count($content, 'name="_token"'));
+    }
+
+    public function test_bubbles_are_classed_by_direction_and_the_blocks_appear_once_each()
+    {
+        $c = WaContact::factory()->create(['phone' => '15550303030', 'profile_name' => 'Sided']);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
+                                      'meta_id' => 'wamid.S1', 'sent_at' => now()->subMinutes(30)]);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
+                                      'meta_id' => 'wamid.S2', 'sent_at' => now()->subHour()]);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
+                                      'meta_id' => 'wamid.S3', 'auto_reply' => true,
+                                      'sent_at' => now()->subMinutes(20)]);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
+                                      'meta_id' => null, 'status' => WaMessage::FAILED,
+                                      'error_code' => '131030', 'error_title' => 'Re-engagement message',
+                                      'sent_at' => now()->subMinute()]);
+
+        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+
+        $this->assertSame(1, substr_count($content, 'class="bubble in"'));
+        $this->assertSame(3, substr_count($content, 'class="bubble out"'));
+        $this->assertSame(1, substr_count($content, '>automatic<'));
+        $this->assertSame(1, substr_count($content, 'FAILED 131030:'));
+    }
+
+    public function test_a_sent_outbound_message_prints_no_failure_block()
+    {
+        $c = WaContact::factory()->create(['phone' => '15550404040']);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
+                                      'status' => WaMessage::SENT, 'auto_reply' => false]);
+
+        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+
+        $this->assertStringNotContainsString('FAILED', $content);
+    }
+
+    public function test_a_template_bubble_names_the_template_and_its_language()
+    {
+        $c = WaContact::factory()->create(['phone' => '15550505050']);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
+                                      'type' => 'template', 'template_name' => 'etp_opener_brand',
+                                      'template_lang' => 'en', 'status' => WaMessage::DELIVERED]);
+
+        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+
+        $this->assertStringContainsString('etp_opener_brand (en)', $content);
+    }
+
+    public function test_thread_header_names_the_opt_out_source()
+    {
+        $c = WaContact::factory()->create(['phone' => '15550606060']);
+        $c->optOut('manual');
+
+        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+
+        $this->assertStringContainsString('OPTED OUT (manual', $content);
+    }
+
+    public function test_thread_header_shows_both_window_branches()
+    {
+        $open = WaContact::factory()->create(['phone' => '15550707070', 'last_inbound_at' => now()]);
+        $closed = WaContact::factory()->create(['phone' => '15550707071', 'last_inbound_at' => now()->subHours(25)]);
+
+        $this->get('/inbox/' . $open->id)->assertOk()->assertSee('reply window open');
+        $this->get('/inbox/' . $closed->id)->assertOk()
+            ->assertSee('reply window closed - approved template required');
+    }
+
+    public function test_the_template_select_is_built_from_the_config_key_not_a_hardcoded_list()
+    {
+        $previous = config('whatsapp.template_choices');
+        config(['whatsapp.template_choices' => ['etp_probe_a', 'etp_probe_b']]);
+
+        try {
+            $c = WaContact::factory()->create(['phone' => '15550808080']);
+
+            $this->get('/inbox/' . $c->id)->assertOk()
+                ->assertSee('<option value="etp_probe_a">', false)
+                ->assertSee('<option value="etp_probe_b">', false);
+        } finally {
+            config(['whatsapp.template_choices' => $previous]);
+        }
+    }
+
+    // ---- M-A rows: pagination is real (shipped only if both M-A arms die) ----
+
+    public function test_the_first_search_page_holds_thirty_rows_and_next_keeps_the_query()
+    {
+        for ($i = 1; $i <= 31; $i++) {
+            WaContact::factory()->create(['profile_name' => sprintf('abc%02d', $i)]);
+        }
+
+        $content = $this->get('/inbox?q=abc')->assertOk()->getContent();
+
+        $this->assertSame(30, substr_count($content, 'href="/inbox/'));
+        $this->assertStringContainsString('Showing 1 to 30 of 31', $content);
+        $this->assertStringContainsString('page=2', $content);
+        $this->assertStringContainsString('q=abc', $content);
+        $this->assertStringNotContainsString('abc01', $content);
+
+        $second = $this->get('/inbox?q=abc&page=2')->assertOk()->getContent();
+        $this->assertStringContainsString('abc01', $second);
+        $this->assertStringContainsString('Showing 31 to 31 of 31', $second);
+        $this->assertStringContainsString('q=abc', $second);
+        $this->assertStringContainsString('page=1', $second);
+    }
+
+    // ---- M-B rows: the ordering is observable (shipped only if they kill arms) ----
+
+    public function test_list_sorts_by_recent_activity_not_by_id()
+    {
+        $senior = WaContact::factory()->create(['profile_name' => 'Senior Id', 'last_inbound_at' => now()]);
+        $junior = WaContact::factory()->create(['profile_name' => 'Junior Id',
+                                                'last_inbound_at' => now()->subHours(10)]);
+        $this->assertLessThan($junior->id, $senior->id);
+
+        $content = $this->get('/inbox')->assertOk()->getContent();
+
+        // PHPUnit's assertLessThan($limit, $actual): the senior (fresher activity, lower id)
+        // link must sit at a SMALLER byte offset than the junior one.
+        $this->assertLessThan(strpos($content, 'href="/inbox/' . $junior->id),
+                              strpos($content, 'href="/inbox/' . $senior->id));
+    }
+
+    public function test_list_breaks_an_activity_tie_by_descending_id()
+    {
+        $at = now();
+        $low = WaContact::factory()->create(['profile_name' => 'Low Id', 'last_inbound_at' => $at]);
+        $high = WaContact::factory()->create(['profile_name' => 'High Id', 'last_inbound_at' => $at]);
+
+        $content = $this->get('/inbox')->assertOk()->getContent();
+
+        $this->assertLessThan(strpos($content, 'href="/inbox/' . $low->id),
+                              strpos($content, 'href="/inbox/' . $high->id));
+    }
+
+    public function test_a_blank_query_lists_everyone_like_no_query_at_all()
+    {
+        WaContact::factory()->create(['phone' => '15550909090', 'profile_name' => 'Cher']);
+        WaContact::factory()->create(['phone' => '15550909091', 'profile_name' => 'Jane Tester']);
+
+        $content = $this->get('/inbox?q=%20')->assertOk()->getContent();
+
+        $this->assertStringContainsString('Cher', $content);
+        $this->assertStringContainsString('Jane Tester', $content);
+    }
+
+    public function test_the_search_box_escapes_what_it_echoes()
+    {
+        $content = $this->get('/inbox?q=%3Cb%3E')->assertOk()->getContent();
+
+        $this->assertStringContainsString('&lt;b&gt;', $content);
+        $this->assertStringNotContainsString('<b>', $content);
+    }
+
+    public function test_an_empty_address_book_shows_the_empty_state_and_no_rows()
+    {
+        $content = $this->get('/inbox')->assertOk()->getContent();
+
+        $this->assertStringContainsString('No contacts yet.', $content);
+        $this->assertStringNotContainsString('href="/inbox/', $content);
+        $this->assertStringNotContainsString('page=', $content);
+    }
+
+    public function test_a_thread_without_messages_shows_a_placeholder()
+    {
+        $c = WaContact::factory()->create(['phone' => '15551010101']);
+
+        $this->get('/inbox/' . $c->id)->assertOk()->assertSee('Nothing here yet.');
+    }
+
+    public function test_the_two_inbox_route_names_the_fence_promises_exist()
+    {
+        $this->assertTrue(Route::has('inbox'));
+        $this->assertTrue(Route::has('inbox.thread'));
+    }
+
+    public function test_list_shows_a_relative_time_for_the_last_inbound()
+    {
+        WaContact::factory()->create(['phone' => '15551111111', 'profile_name' => 'Two Days',
+                                      'last_inbound_at' => now()->subDays(2)->subMinutes(1)]);
+
+        $content = $this->get('/inbox')->assertOk()->getContent();
+
+        $this->assertStringContainsString('2 days ago', $content);
+    }
+
+    public function test_a_thread_page_renders_the_flash_errors_and_old_reply_it_is_handed()
+    {
+        $c = WaContact::factory()->create(['phone' => '15551212121']);
+
+        $bag = new ViewErrorBag;
+        $bag->put('default', new MessageBag([
+            'body' => ['Reply body cannot be blank.'],
+            'window' => ['The 24-hour window is closed.'],
+            'template' => ['Pick an approved template.'],
+        ]));
+
+        $this->withSession(['errors' => $bag, '_old_input' => ['body' => 'etp old reply text']])
+            ->get('/inbox/' . $c->id)->assertOk()
+            ->assertSee('Reply body cannot be blank.')
+            ->assertSee('The 24-hour window is closed.')
+            ->assertSee('Pick an approved template.')
+            ->assertSee('etp old reply text');
+    }
+
+    // ---- R52 review witnesses (task-11-review.md §3.2; each row mutation-verified) ----
+
+    public function test_a_guest_is_bounced_off_the_list_and_the_thread()
+    {
+        $c = WaContact::factory()->create(['phone' => '15551313131']);
+        auth()->logout();
+
+        $this->get('/inbox')->assertRedirect('/login');
+        $this->get('/inbox/' . $c->id)->assertRedirect('/login');
+        $this->assertGuest();
+    }
+
+    public function test_a_thread_lists_oldest_message_first_even_when_insertion_is_scrambled()
+    {
+        $c = WaContact::factory()->create(['phone' => '15551112222']);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
+                                      'body' => 'SECOND-MSG', 'sent_at' => now()->subMinutes(10)]);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
+                                      'body' => 'FIRST-MSG', 'sent_at' => now()->subMinutes(30)]);
+
+        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+
+        $this->assertLessThan(strpos($content, 'SECOND-MSG'), strpos($content, 'FIRST-MSG'));
+    }
+
+    public function test_a_message_body_is_rendered_escaped()
+    {
+        $c = WaContact::factory()->create(['phone' => '15552121212']);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
+                                      'body' => '<script>alert(1)</script>']);
+
+        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+
+        $this->assertStringContainsString('&lt;script&gt;alert(1)&lt;/script&gt;', $content);
+        $this->assertStringNotContainsString('<script>alert(1)', $content);
+    }
+
+    public function test_the_thread_header_and_variables_input_escape_the_profile_name()
+    {
+        $c = WaContact::factory()->create(['phone' => '15552222222', 'profile_name' => '<b>XSS Name</b>']);
+
+        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+
+        $this->assertStringContainsString('<h2 style="margin:0">&lt;b&gt;XSS Name&lt;/b&gt;', $content);
+        $this->assertStringContainsString('value="&lt;b&gt;XSS Name&lt;/b&gt;"', $content);
+        $this->assertStringNotContainsString('<b>XSS Name</b>', $content);
+    }
+
+    public function test_the_contact_list_escapes_the_display_name()
+    {
+        WaContact::factory()->create(['phone' => '15552323232', 'profile_name' => '<i>Italic Name</i>']);
+
+        $content = $this->get('/inbox')->assertOk()->getContent();
+
+        $this->assertStringContainsString('&lt;i&gt;Italic Name&lt;/i&gt;', $content);
+        $this->assertStringNotContainsString('<i>Italic Name</i>', $content);
+    }
+
+    public function test_a_never_replied_contact_sorts_by_its_creation_not_below_active_ones()
+    {
+        $stale = WaContact::factory()->create(['phone' => '15551919191', 'profile_name' => 'Stale Active',
+                                               'last_inbound_at' => now()->subDays(3)]);
+        $freshNull = WaContact::factory()->create(['phone' => '15552020202', 'profile_name' => 'Fresh Never']);
+
+        $content = $this->get('/inbox')->assertOk()->getContent();
+
+        $this->assertLessThan(strpos($content, 'href="/inbox/' . $stale->id),
+                              strpos($content, 'href="/inbox/' . $freshNull->id));
+    }
+
+    public function test_the_three_thread_forms_post_to_the_task_12_urls()
+    {
+        $c = WaContact::factory()->create(['phone' => '15551414141']);
+
+        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+
+        $this->assertStringContainsString('action="/inbox/' . $c->id . '/reply"', $content);
+        $this->assertStringContainsString('action="/inbox/' . $c->id . '/template"', $content);
+        $this->assertStringContainsString('action="/inbox/' . $c->id . '/opt-out"', $content);
+    }
+
+    public function test_pagination_ends_are_spans_not_empty_links()
+    {
+        for ($i = 1; $i <= 31; $i++) {
+            WaContact::factory()->create(['profile_name' => sprintf('abc%02d', $i)]);
+        }
+
+        $first = $this->get('/inbox?q=abc')->assertOk()->getContent();
+        $last = $this->get('/inbox?q=abc&page=2')->assertOk()->getContent();
+
+        $this->assertStringNotContainsString('href=""', $first);
+        $this->assertStringNotContainsString('href=""', $last);
+        $this->assertStringContainsString('>Previous</span>', $first);
+        $this->assertStringContainsString('>Next</span>', $last);
+    }
+
+    public function test_an_inbound_bubble_carries_its_timestamp()
+    {
+        $c = WaContact::factory()->create(['phone' => '15551515151']);
+        $m = WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
+                                           'sent_at' => now()->subMinutes(30)]);
+
+        $this->get('/inbox/' . $c->id)->assertOk()
+            ->assertSee($m->sent_at->toDayDateTimeString());
+    }
+
+    public function test_the_old_reply_is_escaped_when_it_is_echoed()
+    {
+        $c = WaContact::factory()->create(['phone' => '15551616161']);
+
+        $content = $this->withSession(['_old_input' => ['body' => '<script>alert(2)</script>']])
+            ->get('/inbox/' . $c->id)->assertOk()->getContent();
+
+        $this->assertStringContainsString('&lt;script&gt;alert(2)&lt;/script&gt;', $content);
+        $this->assertStringNotContainsString('<script>alert(2)', $content);
+    }
+
+    public function test_a_plain_text_bubble_does_not_claim_to_be_a_template()
+    {
+        $c = WaContact::factory()->create(['phone' => '15551717171']);
+        WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
+                                      'type' => 'text', 'status' => WaMessage::SENT]);
+
+        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+
+        $this->assertStringNotContainsString('&middot; template', $content);
+    }
+
+    public function test_an_empty_address_book_prints_no_showing_line()
+    {
+        $content = $this->get('/inbox')->assertOk()->getContent();
+
+        $this->assertStringNotContainsString('Showing', $content);
+    }
+
+    public function test_a_nameless_contact_falls_back_to_its_number_in_both_views()
+    {
+        $c = WaContact::factory()->create(['phone' => '15551818181', 'profile_name' => null]);
+
+        $list = $this->get('/inbox')->assertOk()->getContent();
+        $this->assertSame(2, substr_count($list, '+15551818181')); // link text + Number column
+
+        $thread = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $this->assertStringContainsString('<h2 style="margin:0">+15551818181', $thread);
+    }
+
+    public function test_the_number_column_escapes_the_phone()
+    {
+        WaContact::factory()->create(['phone' => '<b>15551234567</b>', 'profile_name' => 'Odd Phone']);
+
+        $content = $this->get('/inbox')->assertOk()->getContent();
+
+        $this->assertStringContainsString('+&lt;b&gt;15551234567&lt;/b&gt;', $content);
+        $this->assertStringNotContainsString('+<b>15551234567</b>', $content);
+    }
+
+    // V7 (R50 carry, shipped by R54): the csrf-token meta tag in the layout had no witness -- its
+    // consumer is Task 13-era JavaScript per R50, and no JS ships yet, so this row pins the tag only.
+    // Kills the arm that deletes <meta name="csrf-token"> from resources/views/layout.blade.php.
+    public function test_the_layout_carries_the_csrf_token_meta_tag()
+    {
+        $this->get('/inbox')->assertOk()
+            ->assertSee('<meta name="csrf-token" content="', false);
+    }
+}
+```
 
 - [ ] **Step 5: Run the test**
 
@@ -8182,28 +8825,66 @@ failing test, which is why they are stated here instead of in a ruling about beh
 php artisan test tests/Feature/ImportSendLogTest.php
 ```
 
-Expected: 4 passed.
+Expected: **7 passed (33 assertions)**. Measured intermediate: after the command first landed,
+`3 failed, 4 passed` — the D1 stacked-expectation defect and the fixture design error above; both
+fixed, then 7/33.
 
-- [ ] **Step 6: Import the real log** (this is the file the bench writes, so use a copy to keep the original untouched):
+- [ ] **Step 6: Import the real log ON SCRATCH SQLITE (F4 — never the demo MariaDB).** The original
+step imported into the local default DB and claimed `storage/` is gitignored. BOTH were wrong: the
+demo MariaDB holds the approved UI's data (and Jane Okafor's number is in the real log), and files at
+the storage ROOT are NOT gitignored (Laravel's storage/.gitignore covers subdirs only — measured via
+`git status --short`). The scratch DB and log copy therefore live OUTSIDE the worktree. Verify the
+env override BEFORE trusting it (phpdotenv is immutable; real env wins over `.env`):
 
 ```bash
-cp /c/Users/Hp/Documents/Qoder/2026-10-08/21238e53/send_log.csv storage/send_log_backup.csv
-php artisan wa:import-send-log storage/send_log_backup.csv
-php artisan wa:import-send-log storage/send_log_backup.csv --apply
-php artisan tinker --execute="echo \App\Models\WaContact::count().' contacts, '.\App\Models\WaMessage::count().' messages';"
+SCRATCH=/c/Users/Hp/AppData/Local/Temp/t13import/scratch_import.sqlite
+DB_CONNECTION=sqlite DB_DATABASE=$SCRATCH php artisan tinker --execute="echo config('database.default').' '.config('database.connections.sqlite.database');"
+# must print: sqlite <the scratch path> -- if it prints mysql, STOP
+DB_CONNECTION=sqlite DB_DATABASE=$SCRATCH php artisan migrate --force
+cp /c/Users/Hp/Documents/Qoder/2026-10-08/21238e53/send_log.csv /c/Users/Hp/AppData/Local/Temp/t13import/send_log_backup.csv
+DB_CONNECTION=sqlite DB_DATABASE=$SCRATCH php artisan wa:import-send-log /c/Users/Hp/AppData/Local/Temp/t13import/send_log_backup.csv
+DB_CONNECTION=sqlite DB_DATABASE=$SCRATCH php artisan wa:import-send-log /c/Users/Hp/AppData/Local/Temp/t13import/send_log_backup.csv --apply
+DB_CONNECTION=sqlite DB_DATABASE=$SCRATCH php artisan wa:import-send-log /c/Users/Hp/AppData/Local/Temp/t13import/send_log_backup.csv --apply
 ```
 
-Expected: the dry run prints `DRY RUN: would import ...`; the counts match the rows that have a `message_id`. `storage/send_log_backup.csv` is inside `storage/`, which Laravel's `.gitignore` already excludes — confirm with `git status --short` showing no new file before committing.
+Measured: override printed `sqlite <scratch>`; dry run `DRY RUN: would import 4 messages, 3 contacts,
+5 skipped.` (exactly the F1 prediction for the real log); apply stored 3 contacts / 4 messages, all
+SENT with UTC wall times, 18479043315 twice → one contact; second apply identical (idempotent). No
+`.env` edit, no MariaDB write. The MariaDB import of the real log is deferred to Task 16 on the host.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Run the whole suite**
 
 ```bash
-git add app/Console/Commands/WaImportSendLog.php tests/Feature/ImportSendLogTest.php tests/Fixtures/send_log_sample.csv
+php artisan test
+```
+
+Expected: **302 passed (784 assertions)** — 294 Task-12 baseline + 7 ImportSendLogTest + 1 V7 row.
+
+- [ ] **Step 8: Commit** (all five owned paths — the original list omitted the malformed fixture and
+the V7 row):
+
+```bash
+git add app/Console/Commands/WaImportSendLog.php tests/Feature/ImportSendLogTest.php tests/Feature/InboxViewTest.php tests/Fixtures/send_log_sample.csv tests/Fixtures/send_log_malformed.csv
 git commit -m "feat: idempotent send_log importer"
 ```
 
----
+**R54 review record.** Inline implementation AND review; the controller's 11-arm battery
+(`Temp/t13arms/arms.mjs`, `results.json`, logs A01–A11) ran the WHOLE suite (302 rows) per arm:
+**11/11 killed, 0 green**, every arm occ=1 / landed=true / restored=true (bytes+sha256), every
+kill-set verified to hit only intended rows: A1 narrow guard → both malformed rows; A2 blank-row
+guard → plan dry-run; A3 hardcoded SENT → malformed apply; A4 per-row contact count → malformed
+dry; A5 dry-run gate → both dry rows; A6 empty-wamid guard → plan dry + apply + twice-run; A7
+hasFormat forced false → both apply rows (sent_at); A8 raw source marker → plan apply; A9 header
+check → header row; A10 csrf-meta deleted (closed layout, restored) → V7; A11 file check disabled
+→ missing-file row. Unwitnessed residuals recorded in the report (R42): `is_readable` half of the
+file check; `array_pad` for short rows; the `now()` fallback VALUE; wamid `trim`; the `Imported ...`
+and `Re-run with --apply` copy; host-only varchar widths (real log measured 62/5, safe); the CSV
+`error` column ignored (no wamid+failed row in the real log; FAILED_ROW imports with null
+error_code — honest); over-wide rows would crash `array_combine` (no such writer today). Full
+record: `.superpowers/sdd/2026-11-06-wa-webhook-inbox/task-13-report.md`. **Task 14's baseline is
+302 (784).**
 
+---
 ## Task 14: Retention, schedule, style, full suite
 
 **Deliverable:** webhook events stop accumulating after 30 days without a cron line nobody wrote down, and the whole suite plus Laravel Pint are clean.

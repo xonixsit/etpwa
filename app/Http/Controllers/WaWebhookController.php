@@ -16,7 +16,7 @@ class WaWebhookController extends Controller
         $token = (string) config('whatsapp.verify_token', '');
         $sent = $this->param($request, 'hub.verify_token', 'hub_verify_token');
 
-        if ($token === '' || !hash_equals($token, $sent)) {
+        if ($token === '' || ! hash_equals($token, $sent)) {
             return response('forbidden', 403);
         }
 
@@ -34,12 +34,12 @@ class WaWebhookController extends Controller
         $raw = $request->getContent();
         $secret = (string) config('whatsapp.app_secret', '');
 
-        if (!WebhookSignature::isValid($raw, $request->header('X-Hub-Signature-256'), $secret)) {
+        if (! WebhookSignature::isValid($raw, $request->header('X-Hub-Signature-256'), $secret)) {
             return response('forbidden', 403);
         }
 
         $payload = json_decode($raw, true);
-        if (!is_array($payload)) {
+        if (! is_array($payload)) {
             WaWebhookEvent::store(null, null, ['body' => mb_substr($raw, 0, 2000)],
                 WaWebhookEvent::IGNORED, hash('sha256', $raw));
 
@@ -59,7 +59,7 @@ class WaWebhookController extends Controller
             return $this->accepted();
         }
 
-        if (!$parsed['matched']) {
+        if (! $parsed['matched']) {
             WaWebhookEvent::store($numberFor, $entryId, $parsed['items'],
                 WaWebhookEvent::IGNORED, $hash);
 

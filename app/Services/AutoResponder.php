@@ -9,9 +9,7 @@ use Illuminate\Support\Facades\Cache;
 
 class AutoResponder
 {
-    public function __construct(private WhatsAppSender $sender)
-    {
-    }
+    public function __construct(private WhatsAppSender $sender) {}
 
     public function handle(WaMessage $in, ?string $buttonId = null): void
     {
@@ -26,7 +24,7 @@ class AutoResponder
             $wasSilenced = $contact->isOptedOut();
             $contact->optOut('inbound_keyword');
             $text = (string) config('whatsapp.opt_out_text', '');
-            if (!$wasSilenced && $text !== '') {
+            if (! $wasSilenced && $text !== '') {
                 // D1: the ONE exemption to the sender's suppression gate -- the confirmation the
                 // suppression regime owes the contact after their own STOP.
                 $this->sender->sendText($contact->phone, $text, autoReply: true, allowSuppressed: true);
@@ -62,7 +60,7 @@ class AutoResponder
         }
 
         // The race guard. Atomic on the production store, not on the test store -- see R46.
-        if (!Cache::add('wa-ack-' . $contact->id, 1, now()->addHours($hours))) {
+        if (! Cache::add('wa-ack-'.$contact->id, 1, now()->addHours($hours))) {
             return;
         }
 

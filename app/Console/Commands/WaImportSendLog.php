@@ -16,15 +16,15 @@ class WaImportSendLog extends Command
     public function handle(): int
     {
         $path = (string) $this->argument('path');
-        if (!is_file($path) || !is_readable($path)) {
-            $this->error('File not found or unreadable: ' . $path);
+        if (! is_file($path) || ! is_readable($path)) {
+            $this->error('File not found or unreadable: '.$path);
 
             return 1;
         }
 
         $handle = fopen($path, 'rb');
         $header = fgetcsv($handle);
-        if (!is_array($header) || !in_array('to', $header, true)) {
+        if (! is_array($header) || ! in_array('to', $header, true)) {
             $this->error('Not a send log: expected a header row containing "to".');
 
             return 1;
@@ -46,7 +46,7 @@ class WaImportSendLog extends Command
             // R54/F2: the guard is fromPhone()'s own predicate (10..20 digits, the column width),
             // not strlen >= 10 -- a 21-digit phone passed the narrow guard and crashed --apply
             // mid-loop with partial writes. Undialable rows are counted skipped, like refusals.
-            if (!WaContact::isDialable($phone)) {
+            if (! WaContact::isDialable($phone)) {
                 $skipped++;
 
                 continue;
@@ -62,7 +62,7 @@ class WaImportSendLog extends Command
             $distinctPhones[$phone] = true;
             $messages++;
 
-            if (!$apply) {
+            if (! $apply) {
                 continue;
             }
 
@@ -88,7 +88,7 @@ class WaImportSendLog extends Command
 
         $this->line($apply ? "Imported {$messages} messages, {$contacts} contacts, {$skipped} skipped."
                            : "DRY RUN: would import {$messages} messages, {$contacts} contacts, {$skipped} skipped.");
-        if (!$apply) {
+        if (! $apply) {
             $this->line('Re-run with --apply to write.');
         }
 

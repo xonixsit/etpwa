@@ -6,12 +6,12 @@ class WebhookSignature
 {
     public static function isValid(string $rawBody, ?string $header, string $secret): bool
     {
-        if ($secret === '' || $header === null || !str_starts_with($header, 'sha256=')) {
+        if ($secret === '' || $header === null || ! str_starts_with($header, 'sha256=')) {
             return false;
         }
 
         $given = strtolower(substr($header, 7));
-        if (!preg_match('/^[0-9a-f]{64}$/', $given)) {
+        if (! preg_match('/^[0-9a-f]{64}$/', $given)) {
             return false;
         }
 

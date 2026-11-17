@@ -12,13 +12,19 @@ class WaMessage extends Model
     use HasFactory;
 
     public const IN = 'in';
+
     public const OUT = 'out';
 
     public const SENT = 'sent';
+
     public const DELIVERED = 'delivered';
+
     public const READ = 'read';
+
     public const FAILED = 'failed';
+
     public const INCOMING = 'incoming';
+
     public const DELETED = 'deleted';
 
     protected $fillable = [
@@ -52,7 +58,7 @@ class WaMessage extends Model
             return self::create($attrs);
         }
 
-        if ($row->direction === self::IN || !self::mayReplaceStatus($row->status, $attrs['status'] ?? null)) {
+        if ($row->direction === self::IN || ! self::mayReplaceStatus($row->status, $attrs['status'] ?? null)) {
             unset($attrs['status'], $attrs['status_at'], $attrs['error_code'], $attrs['error_title']);
         }
         unset($attrs['wa_contact_id'], $attrs['direction']);
@@ -108,7 +114,7 @@ class WaMessage extends Model
 
     public function applyStatus(string $status, CarbonInterface $at, ?string $code = null, ?string $title = null): void
     {
-        if ($this->direction === self::IN || !self::mayReplaceStatus($this->status, $status)) {
+        if ($this->direction === self::IN || ! self::mayReplaceStatus($this->status, $status)) {
             return;
         }
 

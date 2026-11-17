@@ -42,7 +42,7 @@ class WaContact extends Model
     public static function fromPhone(string $raw): self
     {
         $phone = self::digitsOnly($raw);
-        if (!self::isDialable($phone)) {
+        if (! self::isDialable($phone)) {
             throw new \InvalidArgumentException("not an E.164 number: {$raw}");
         }
 
@@ -86,6 +86,6 @@ class WaContact extends Model
     {
         return $this->profile_name !== '' && $this->profile_name !== null
             ? $this->profile_name
-            : '+' . $this->phone;
+            : '+'.$this->phone;
     }
 }

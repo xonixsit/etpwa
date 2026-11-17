@@ -74,7 +74,6 @@ class OptOutKeywordsTest extends TestCase
      * R45: "opt out" is two words, so the old word-by-word scan could only ever match it as a whole
      * line -- "I want to opt out now" did not suppress, while "please opt-out now" did. A missed
      * opt-out is the unrecoverable direction, so the phrase must match anywhere in the first line.
-     *
      */
     #[DataProvider('phraseProvider')]
     public function test_the_two_word_phrase_matches_anywhere(string $text)
@@ -95,7 +94,6 @@ class OptOutKeywordsTest extends TestCase
      * R45: `end` and `remove` are ordinary English in a tax conversation, so they only mean opt-out
      * when they are the entire message. This is the tier that keeps the loose direction honest instead
      * of silencing a client who asked about a deadline.
-     *
      */
     #[DataProvider('ambiguousProvider')]
     public function test_ambiguous_words_do_not_fire_mid_sentence(string $text)
@@ -132,7 +130,6 @@ class OptOutKeywordsTest extends TestCase
      * Reviewer F-4: iOS autocorrect and pasted text emit U+00A0 and friends, which an ASCII-only \s and
      * trim() do not see as separators -- so a space can hide the keyword. A hidden keyword is a missed
      * opt-out, the unrecoverable direction, hence the Unicode-aware split.
-     *
      */
     #[DataProvider('unicodeSpaceProvider')]
     public function test_unicode_spaces_do_not_hide_the_keyword(string $text)
@@ -165,7 +162,6 @@ class OptOutKeywordsTest extends TestCase
      * unasked, and a trailing "…" is a common way to end a one-word message. A byte-level strip cannot see
      * either, and for `end`/`remove` one stray mark defeats the whole-message tier as well as the word
      * scan, because the token no longer equals the keyword.
-     *
      */
     #[DataProvider('unicodePunctuationProvider')]
     public function test_unicode_punctuation_does_not_hide_the_keyword(string $text)

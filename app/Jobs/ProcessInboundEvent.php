@@ -14,9 +14,7 @@ class ProcessInboundEvent implements ShouldQueue
 
     public int $tries = 3;
 
-    public function __construct(public array $item)
-    {
-    }
+    public function __construct(public array $item) {}
 
     public function handle(): void
     {

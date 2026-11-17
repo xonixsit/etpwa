@@ -4,7 +4,9 @@ namespace Tests\Feature;
 
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Route;
 use Tests\TestCase;
 
 class AuthTest extends TestCase
@@ -21,7 +23,7 @@ class AuthTest extends TestCase
     public function test_correct_credentials_open_a_session_and_send_staff_to_the_inbox()
     {
         User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                 'password' => Hash::make('good-pass-123')]);
+            'password' => Hash::make('good-pass-123')]);
 
         $this->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'good-pass-123'])
             ->assertRedirect('/inbox');
@@ -32,7 +34,7 @@ class AuthTest extends TestCase
     public function test_wrong_password_stays_on_the_form()
     {
         User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                 'password' => Hash::make('good-pass-123')]);
+            'password' => Hash::make('good-pass-123')]);
 
         $this->from('/login')->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'nope'])
             ->assertRedirect('/login')
@@ -81,7 +83,7 @@ class AuthTest extends TestCase
     public function test_the_sixth_login_attempt_is_refused_by_the_throttle()
     {
         User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                 'password' => Hash::make('good-pass-123')]);
+            'password' => Hash::make('good-pass-123')]);
 
         for ($attempt = 1; $attempt <= 5; $attempt++) {
             $this->from('/login')->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'nope'])
@@ -97,7 +99,7 @@ class AuthTest extends TestCase
     {
         $html = $this->get('/login')->getContent();
 
-        $this->assertStringContainsString('name="_token" value="' . session()->token() . '"', $html);
+        $this->assertStringContainsString('name="_token" value="'.session()->token().'"', $html);
     }
 
     public function test_the_login_endpoint_rejects_a_request_with_no_token()
@@ -106,7 +108,7 @@ class AuthTest extends TestCase
         $this->app->instance('env', 'production');
 
         User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                 'password' => Hash::make('good-pass-123')]);
+            'password' => Hash::make('good-pass-123')]);
 
         $html = $this->get('/login')->getContent();
         preg_match('/name="_token" value="([^"]+)"/', $html, $match);
@@ -130,7 +132,7 @@ class AuthTest extends TestCase
     public function test_a_failed_sign_in_displays_the_credentials_message()
     {
         User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                 'password' => Hash::make('good-pass-123')]);
+            'password' => Hash::make('good-pass-123')]);
 
         $this->from('/login')->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'nope']);
 
@@ -142,8 +144,8 @@ class AuthTest extends TestCase
     public function test_stay_signed_in_sets_a_recall_token()
     {
         $user = User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                         'password' => Hash::make('good-pass-123'),
-                                         'remember_token' => null]);
+            'password' => Hash::make('good-pass-123'),
+            'remember_token' => null]);
 
         $this->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'good-pass-123', 'remember' => '1'])
             ->assertRedirect('/inbox');
@@ -154,8 +156,8 @@ class AuthTest extends TestCase
     public function test_no_recall_token_is_set_when_stay_signed_in_is_left_unchecked()
     {
         $user = User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                         'password' => Hash::make('good-pass-123'),
-                                         'remember_token' => null]);
+            'password' => Hash::make('good-pass-123'),
+            'remember_token' => null]);
 
         $this->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'good-pass-123'])
             ->assertRedirect('/inbox');
@@ -165,21 +167,21 @@ class AuthTest extends TestCase
 
     public function test_the_validate_block_runs_and_the_email_rule_is_the_email_rule()
     {
-        \Illuminate\Support\Facades\DB::enableQueryLog();
+        DB::enableQueryLog();
 
-        \Illuminate\Support\Facades\DB::flushQueryLog();
+        DB::flushQueryLog();
         $this->post('/login', ['email' => 'not-an-email', 'password' => 'anything']);
-        $this->assertSame(0, count(\Illuminate\Support\Facades\DB::getQueryLog()));
+        $this->assertSame(0, count(DB::getQueryLog()));
 
-        \Illuminate\Support\Facades\DB::flushQueryLog();
+        DB::flushQueryLog();
         $this->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => 'wrong-but-shaped']);
-        $this->assertGreaterThan(0, count(\Illuminate\Support\Facades\DB::getQueryLog()));
+        $this->assertGreaterThan(0, count(DB::getQueryLog()));
     }
 
     public function test_a_missing_password_is_a_redirect_not_a_crash()
     {
         User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                 'password' => Hash::make('good-pass-123')]);
+            'password' => Hash::make('good-pass-123')]);
 
         $this->post('/login', ['email' => 'staff@etaxplanner.com'])
             ->assertStatus(302);
@@ -189,7 +191,7 @@ class AuthTest extends TestCase
     public function test_a_nested_array_password_is_a_302_not_a_500()
     {
         User::factory()->create(['email' => 'staff@etaxplanner.com',
-                                 'password' => Hash::make('good-pass-123')]);
+            'password' => Hash::make('good-pass-123')]);
 
         $this->post('/login', ['email' => 'staff@etaxplanner.com', 'password' => ['nested']])
             ->assertStatus(302);
@@ -250,8 +252,8 @@ class AuthTest extends TestCase
 
     public function test_the_two_route_names_the_deliverable_promises_exist()
     {
-        $this->assertTrue(\Illuminate\Support\Facades\Route::has('login'));
-        $this->assertTrue(\Illuminate\Support\Facades\Route::has('logout'));
+        $this->assertTrue(Route::has('login'));
+        $this->assertTrue(Route::has('logout'));
     }
 
     public function test_the_throttle_is_on_the_post_only()

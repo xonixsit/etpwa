@@ -7,6 +7,7 @@ use App\Models\WaMessage;
 use App\Services\SuppressedContactException;
 use App\Services\WhatsAppSender;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
@@ -90,7 +91,7 @@ class WhatsAppSenderTest extends TestCase
     {
         Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.OUT11']]], 200)]);
         app(WhatsAppSender::class)->sendTemplate('18479043315', 'etp_welcome_c', 'en_US');
-        Http::assertSent(fn ($r) => !array_key_exists('components', $r['template']));
+        Http::assertSent(fn ($r) => ! array_key_exists('components', $r['template']));
     }
 
     public function test_a_punctuated_phone_is_stored_and_sent_as_digits()
@@ -140,7 +141,7 @@ class WhatsAppSenderTest extends TestCase
         // reached the catch -- every fake answered, and the two config guards return before the
         // request. A cURL error message is unbounded text that lands in error_title(255), so the same
         // reader caps it here as it does Meta's own message.
-        Http::fake(['*' => fn () => throw new \Illuminate\Http\Client\ConnectionException(
+        Http::fake(['*' => fn () => throw new ConnectionException(
             str_repeat('x', 400))]);
 
         $m = app(WhatsAppSender::class)->sendText('18479043315', 'x');

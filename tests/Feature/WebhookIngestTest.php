@@ -24,7 +24,7 @@ class WebhookIngestTest extends TestCase
     private function postCallback(string $raw, ?string $sig = 'bad')
     {
         if ($sig === 'bad') {
-            $sig = 'sha256=' . hash_hmac('sha256', $raw, 'appsecret-test');
+            $sig = 'sha256='.hash_hmac('sha256', $raw, 'appsecret-test');
         }
 
         return $this->call('POST', '/wa/webhook', [], [], [],
@@ -42,7 +42,7 @@ class WebhookIngestTest extends TestCase
     public function test_bad_signature_is_403_and_stores_nothing()
     {
         $raw = file_get_contents(base_path('tests/Fixtures/inbound_text.json'));
-        $this->postCallback($raw, 'sha256=' . str_repeat('0', 64))->assertForbidden();
+        $this->postCallback($raw, 'sha256='.str_repeat('0', 64))->assertForbidden();
         $this->assertSame(0, WaWebhookEvent::count());
     }
 

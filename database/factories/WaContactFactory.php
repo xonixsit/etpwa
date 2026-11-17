@@ -12,7 +12,7 @@ class WaContactFactory extends Factory
     public function definition(): array
     {
         return [
-            'phone' => '1' . $this->faker->unique()->numerify('##########'),
+            'phone' => '1'.$this->faker->unique()->numerify('##########'),
             'profile_name' => $this->faker->name(),
         ];
     }

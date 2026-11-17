@@ -8,26 +8,24 @@ use Illuminate\Http\Client\Factory;
 
 class WhatsAppSender
 {
-    public function __construct(private Factory $http)
-    {
-    }
+    public function __construct(private Factory $http) {}
 
     public function sendText(string $phone, string $text, bool $autoReply = false,
-                             bool $allowSuppressed = false): WaMessage
+        bool $allowSuppressed = false): WaMessage
     {
         return $this->post(
             ['messaging_product' => 'whatsapp', 'to' => $phone, 'type' => 'text',
-             'text' => ['preview_url' => false, 'body' => $text]],
+                'text' => ['preview_url' => false, 'body' => $text]],
             $phone,
             ['direction' => WaMessage::OUT, 'type' => 'text', 'body' => $text,
-             'auto_reply' => $autoReply],
+                'auto_reply' => $autoReply],
             $allowSuppressed,
         );
     }
 
     public function sendTemplate(string $phone, string $name, string $lang,
-                                 array $variables = [], bool $autoReply = false,
-                                 bool $allowSuppressed = false): WaMessage
+        array $variables = [], bool $autoReply = false,
+        bool $allowSuppressed = false): WaMessage
     {
         $components = [];
         $image = (string) (config('whatsapp.header_images')[$name] ?? '');
@@ -47,10 +45,10 @@ class WhatsAppSender
 
         return $this->post(
             ['messaging_product' => 'whatsapp', 'to' => $phone, 'type' => 'template',
-             'template' => $template],
+                'template' => $template],
             $phone,
             ['direction' => WaMessage::OUT, 'type' => 'template', 'template_name' => $name,
-             'template_lang' => $lang, 'auto_reply' => $autoReply],
+                'template_lang' => $lang, 'auto_reply' => $autoReply],
             $allowSuppressed,
         );
     }
@@ -67,7 +65,7 @@ class WhatsAppSender
     }
 
     private function post(array $payload, string $phone, array $attrs,
-                          bool $allowSuppressed = false): WaMessage
+        bool $allowSuppressed = false): WaMessage
     {
         // R35: the contact row and the payload have to agree. fromPhone() normalises internally, so
         // the first draft stored digits while sending the caller's punctuation -- Meta answers that
@@ -83,8 +81,8 @@ class WhatsAppSender
         // between this read and the send can slip one message; the plan sanctions accepting the race
         // (recorded in the ledger).
         $gateContact = WaContact::where('phone', $phone)->first();
-        if (!$allowSuppressed && $gateContact?->isOptedOut()) {
-            throw new SuppressedContactException();
+        if (! $allowSuppressed && $gateContact?->isOptedOut()) {
+            throw new SuppressedContactException;
         }
 
         $contact = WaContact::fromPhone($phone);
@@ -104,7 +102,7 @@ class WhatsAppSender
             ]);
         }
 
-        $url = rtrim((string) config('whatsapp.api_base'), '/') . '/' . $phoneId . '/messages';
+        $url = rtrim((string) config('whatsapp.api_base'), '/').'/'.$phoneId.'/messages';
 
         try {
             // R33: ->timeout() is the option. post() is declared post(string $url, $data = [])

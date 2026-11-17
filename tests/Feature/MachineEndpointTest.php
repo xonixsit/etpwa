@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\WaContact;
 use App\Models\WaMessage;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Route;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
@@ -20,7 +21,7 @@ class MachineEndpointTest extends TestCase
 
     private function bearer(string $token = 'export-test'): array
     {
-        return ['HTTP_AUTHORIZATION' => 'Bearer ' . $token];
+        return ['HTTP_AUTHORIZATION' => 'Bearer '.$token];
     }
 
     public function test_suppressions_lists_only_opted_out_numbers_sorted()
@@ -72,7 +73,7 @@ class MachineEndpointTest extends TestCase
     public function test_record_send_replays_do_not_duplicate()
     {
         $body = ['to' => '18479043315', 'template' => 'etp_welcome_c', 'language' => 'en_US',
-                 'message_id' => 'wamid.BENCH2', 'utc_time' => '2026-11-06T10:00:00Z'];
+            'message_id' => 'wamid.BENCH2', 'utc_time' => '2026-11-06T10:00:00Z'];
         $this->postJson('/inbound/record-send', $body, $this->bearer());
         $this->postJson('/inbound/record-send', $body, $this->bearer());
         $this->assertSame(1, WaMessage::count());
@@ -151,7 +152,7 @@ class MachineEndpointTest extends TestCase
     {
         // N4. One row per required rule, so a required: that quietly becomes nullable: shows up on its own.
         $body = ['to' => '18479043315', 'template' => 'etp_welcome_a', 'language' => 'en_US',
-                 'message_id' => 'wamid.BENCH_N4', 'utc_time' => '2026-11-06T10:00:00Z'];
+            'message_id' => 'wamid.BENCH_N4', 'utc_time' => '2026-11-06T10:00:00Z'];
         unset($body[$field]);
 
         $this->postJson('/inbound/record-send', $body, $this->bearer())->assertStatus(422);
@@ -163,7 +164,7 @@ class MachineEndpointTest extends TestCase
         return [
             // The 'to' value is 21 characters but only 11 of them are digits, so the only thing standing
             // between it and the phone column is max:20 -- the digit guard would let 11 digits through.
-            ['to', str_repeat('+', 10) . '18479043315'],
+            ['to', str_repeat('+', 10).'18479043315'],
             ['template', str_repeat('t', 121)],
             ['language', str_repeat('e', 11)],
             ['message_id', str_repeat('w', 129)],
@@ -176,7 +177,7 @@ class MachineEndpointTest extends TestCase
         // N5. Without these the max: rules are decoration and an over-wide value reaches a width-limited
         // column (language 10, meta_id 128, phone 20).
         $body = ['to' => '18479043315', 'template' => 'etp_welcome_a', 'language' => 'en_US',
-                 'message_id' => 'wamid.BENCH_N5', 'utc_time' => '2026-11-06T10:00:00Z'];
+            'message_id' => 'wamid.BENCH_N5', 'utc_time' => '2026-11-06T10:00:00Z'];
         $body[$field] = $value;
 
         $this->postJson('/inbound/record-send', $body, $this->bearer())->assertStatus(422);
@@ -261,7 +262,7 @@ class MachineEndpointTest extends TestCase
         // SESSION_DRIVER is array in tests, so a cookie is the whole of what is observable here.
         $res = $verb === 'get' ? $this->getJson($uri, $this->bearer()) : $this->postJson($uri, $body, $this->bearer());
 
-        $this->assertTrue($res->isSuccessful(), $verb . ' ' . $uri . ' answered ' . $res->getStatusCode());
+        $this->assertTrue($res->isSuccessful(), $verb.' '.$uri.' answered '.$res->getStatusCode());
         $this->assertSame([], $res->headers->getCookies());
     }
 
@@ -271,7 +272,7 @@ class MachineEndpointTest extends TestCase
         // token row), so moving ->middleware('wa.bearer') off the group onto the GET alone left the whole suite
         // green except that half-row. This is the negative-bearer row for the write endpoint on its own.
         $body = ['to' => '18479043315', 'template' => 'etp_opener_brand', 'language' => 'en',
-                 'message_id' => 'wamid.BENCH_W1', 'utc_time' => '2026-11-06T10:00:00Z'];
+            'message_id' => 'wamid.BENCH_W1', 'utc_time' => '2026-11-06T10:00:00Z'];
 
         $this->postJson('/inbound/record-send', $body)->assertUnauthorized();
         $this->postJson('/inbound/record-send', $body, $this->bearer('nope'))->assertUnauthorized();
@@ -283,8 +284,8 @@ class MachineEndpointTest extends TestCase
         // W2. Task 9 parity (AuthTest's route-name row): the fence ships both names and nothing read them.
         // Asserted through Route::has(), never through a generated URL, because a name asserted against a URL
         // passes for the wrong reason under a different APP_URL.
-        $this->assertTrue(\Illuminate\Support\Facades\Route::has('wa.suppressions'));
-        $this->assertTrue(\Illuminate\Support\Facades\Route::has('wa.record_send'));
+        $this->assertTrue(Route::has('wa.suppressions'));
+        $this->assertTrue(Route::has('wa.record_send'));
     }
 
     public function test_a_non_string_to_is_422_not_a_crash(): void
@@ -313,7 +314,7 @@ class MachineEndpointTest extends TestCase
         // W4. Same class as W3 for the other three 'string' rules. No min:/max: length rule on these fields
         // counts elements the way min:10 does on to, so a one-element array already reaches the DB binding.
         $body = ['to' => '18479043315', 'template' => 'etp_welcome_a', 'language' => 'en_US',
-                 'message_id' => 'wamid.BENCH_W4', 'utc_time' => '2026-11-06T10:00:00Z'];
+            'message_id' => 'wamid.BENCH_W4', 'utc_time' => '2026-11-06T10:00:00Z'];
         $body[$field] = $value;
 
         $this->postJson('/inbound/record-send', $body, $this->bearer())->assertStatus(422);

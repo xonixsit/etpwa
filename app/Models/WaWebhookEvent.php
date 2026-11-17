@@ -7,8 +7,11 @@ use Illuminate\Database\Eloquent\Model;
 class WaWebhookEvent extends Model
 {
     public const STORED = 'stored';
+
     public const DUPLICATE = 'duplicate';
+
     public const IGNORED = 'ignored';
+
     public const REJECTED = 'rejected_signature';
 
     protected $fillable = [
@@ -21,8 +24,8 @@ class WaWebhookEvent extends Model
     }
 
     public static function store(?string $phoneNumberId, ?string $entryId, array $changes,
-                                 string $status, ?string $bodyHash = null,
-                                 string $signatureValid = 'valid'): self
+        string $status, ?string $bodyHash = null,
+        string $signatureValid = 'valid'): self
     {
         return self::create([
             'received_at' => now(),

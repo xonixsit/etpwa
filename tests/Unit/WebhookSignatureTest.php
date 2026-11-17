@@ -16,7 +16,7 @@ class WebhookSignatureTest extends TestCase
 
     private function good(): string
     {
-        return 'sha256=' . hash_hmac('sha256', $this->body(), self::SECRET);
+        return 'sha256='.hash_hmac('sha256', $this->body(), self::SECRET);
     }
 
     public function test_accepts_a_correct_sha256_header()
@@ -31,13 +31,13 @@ class WebhookSignatureTest extends TestCase
 
     public function test_rejects_wrong_prefix()
     {
-        $sha1 = 'sha1=' . hash_hmac('sha1', $this->body(), self::SECRET);
+        $sha1 = 'sha1='.hash_hmac('sha1', $this->body(), self::SECRET);
         $this->assertFalse(WebhookSignature::isValid($this->body(), $sha1, self::SECRET));
     }
 
     public function test_rejects_tampered_body()
     {
-        $this->assertFalse(WebhookSignature::isValid($this->body() . ' ', $this->good(), self::SECRET));
+        $this->assertFalse(WebhookSignature::isValid($this->body().' ', $this->good(), self::SECRET));
     }
 
     public function test_rejects_empty_secret()

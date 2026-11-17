@@ -14,7 +14,7 @@ class WaMessageFactory extends Factory
     {
         return [
             'wa_contact_id' => WaContact::factory(),
-            'meta_id' => 'wamid.' . $this->faker->unique()->md5(),
+            'meta_id' => 'wamid.'.$this->faker->unique()->md5(),
             'direction' => WaMessage::IN,
             'type' => 'text',
             'body' => $this->faker->sentence(),

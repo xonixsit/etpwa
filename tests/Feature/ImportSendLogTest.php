@@ -59,7 +59,7 @@ class ImportSendLogTest extends TestCase
     public function test_a_missing_file_fails_without_touching_the_database()
     {
         $this->artisan('wa:import-send-log', ['path' => base_path('tests/Fixtures/nope.csv'),
-                                              '--apply' => true])
+            '--apply' => true])
             ->expectsOutputToContain('not found')
             ->assertExitCode(1);
         $this->assertSame(0, WaMessage::count());
@@ -112,7 +112,7 @@ class ImportSendLogTest extends TestCase
     // refused before any row is read, not imported through array_combine warnings.
     public function test_a_file_without_the_send_log_header_is_refused()
     {
-        $path = sys_get_temp_dir() . '/wa-not-a-log-' . getmypid() . '.csv';
+        $path = sys_get_temp_dir().'/wa-not-a-log-'.getmypid().'.csv';
         file_put_contents($path, "name,phone\nJane,18479043315\n");
         try {
             $this->artisan('wa:import-send-log', ['path' => $path, '--apply' => true])

@@ -3,6 +3,7 @@
 namespace App\Support;
 
 use App\Models\WaContact;
+use App\Models\WaMessage;
 use Carbon\Carbon;
 use Carbon\CarbonInterface;
 
@@ -67,7 +68,7 @@ class WebhookParser
         $phone = WaContact::digitsOnly(self::str($contact['wa_id'] ?? null));
         $name = self::nullableStr(self::path($contact, 'profile', 'name'), 255);
 
-        if (!WaContact::isDialable($phone) || $name === null) {
+        if (! WaContact::isDialable($phone) || $name === null) {
             return null;
         }
 
@@ -82,7 +83,7 @@ class WebhookParser
         $isOut = $mine !== '' && $from === $mine;
         $phone = WaContact::digitsOnly($isOut ? self::str($m['to'] ?? null) : $from);
 
-        if (!WaContact::isDialable($phone)) {
+        if (! WaContact::isDialable($phone)) {
             return null;
         }
 
@@ -90,7 +91,7 @@ class WebhookParser
             'kind' => 'message',
             'meta_id' => self::nullableStr($m['id'] ?? null, 128),
             'phone' => $phone,
-            'direction' => $isOut ? \App\Models\WaMessage::OUT : \App\Models\WaMessage::IN,
+            'direction' => $isOut ? WaMessage::OUT : WaMessage::IN,
             'type' => self::str($m['type'] ?? null, 24) ?: 'unknown',
             'text' => self::nullableStr(self::path($m, 'text', 'body'))
                 ?? self::nullableStr(self::path($m, 'button', 'text'))
@@ -110,7 +111,7 @@ class WebhookParser
         $s = self::arr($raw);
         $phone = WaContact::digitsOnly(self::str($s['recipient_id'] ?? null));
 
-        if (!WaContact::isDialable($phone)) {
+        if (! WaContact::isDialable($phone)) {
             return null;
         }
 
@@ -148,7 +149,7 @@ class WebhookParser
         $cursor = $row;
 
         foreach ($keys as $key) {
-            if (!is_array($cursor) || !array_key_exists($key, $cursor)) {
+            if (! is_array($cursor) || ! array_key_exists($key, $cursor)) {
                 return null;
             }
 
@@ -203,7 +204,7 @@ class WebhookParser
      */
     private static function ts(mixed $epoch): ?CarbonInterface
     {
-        if (!is_numeric($epoch) || $epoch < self::MIN_EPOCH
+        if (! is_numeric($epoch) || $epoch < self::MIN_EPOCH
             || $epoch > Carbon::now()->addDay()->getTimestamp()) {
             return null;
         }

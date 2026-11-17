@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\WaContact;
 use App\Models\WaMessage;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Validation\ValidationException;
 
 class MachineController extends Controller
@@ -34,15 +35,15 @@ class MachineController extends Controller
         // Measured: an uncaught InvalidArgumentException renders a 500 here, so the bench gets a server
         // error for a body it could fix. Reject it as a 422 through WaContact's own predicate instead --
         // one definition of "dialable", no duplicated length literals.
-        if (!WaContact::isDialable(WaContact::digitsOnly($data['to']))) {
+        if (! WaContact::isDialable(WaContact::digitsOnly($data['to']))) {
             throw ValidationException::withMessages([
                 'to' => 'The to field must contain a dialable phone number.',
             ]);
         }
 
         $contact = WaContact::fromPhone($data['to']);
-        $sentAt = isset($data['utc_time']) && \Illuminate\Support\Carbon::hasFormat($data['utc_time'], 'Y-m-d\TH:i:s\Z')
-            ? \Illuminate\Support\Carbon::parse($data['utc_time'], 'UTC')
+        $sentAt = isset($data['utc_time']) && Carbon::hasFormat($data['utc_time'], 'Y-m-d\TH:i:s\Z')
+            ? Carbon::parse($data['utc_time'], 'UTC')
             : now();
 
         WaMessage::record([

@@ -244,7 +244,11 @@ this repo, and `.gitignore` already excludes `.env`.
   error code Meta returns for this account is captured on the first live occurrence and written to
   the message row rather than assumed here.
 - Contact opted out while a message of theirs is still in flight → the send is refused at the gate
-  in `WhatsAppSender`, which re-reads `opted_out_at` in the same transaction that writes the row.
+  in `WhatsAppSender`, which re-reads the contact by normalised phone before any row write or HTTP
+  attempt and throws `SuppressedContactException` (R53 amendment: no transaction or row lock is held
+  across the network wait; a concurrent opt-out between gate and send can slip one message — the
+  race is accepted and recorded in the ledger). One exemption: the opt-out confirmation itself
+  (`allowSuppressed: true`), the one send the suppression regime owes the contact after their STOP.
 - Unknown message type inbound → row stored with the type, body null, and a visible
   "(unsupported message type: image)" line in the thread. No crash, no dropped callback.
 - Meta retries the same POST → `duplicate`, no second row, no second auto-reply.

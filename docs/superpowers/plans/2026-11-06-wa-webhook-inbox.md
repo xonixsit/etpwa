@@ -6833,12 +6833,32 @@ sha8 `4eca0d0f`**. All LF-only.
 
 ## Task 12: Reply, template send, manual opt-out
 
-**Deliverable:** staff can reply while the window is open, send an approved template when it is not, and silence a contact from the thread. A closed window is refused before the API is called, and nothing at all can be sent to an opted-out contact.
+**Deliverable:** staff can reply while the window is open, send an approved template when it is not, and silence a contact from the thread. A closed window is refused before the API is called, and nothing at all can be sent to an opted-out contact — enforced by a gate in `WhatsAppSender` itself, so every present and future caller inherits the refusal.
 
 **Consumes:** `WhatsAppSender` (Task 6), `WaContact::windowOpen()` / `optOut()` (Task 2), views from Task 11.
-**Produces:** `POST /inbox/{contact}/reply`, `POST /inbox/{contact}/template`, `POST /inbox/{contact}/opt-out`.
+**Produces:** `POST /inbox/{contact}/reply`, `POST /inbox/{contact}/template`, `POST /inbox/{contact}/opt-out` (names `inbox.reply` / `inbox.template` / `inbox.optout`); `App\Services\SuppressedContactException`; `sendText(string $phone, string $text, bool $autoReply = false, bool $allowSuppressed = false): WaMessage` and `sendTemplate(string $phone, string $name, string $lang, array $variables = [], bool $autoReply = false, bool $allowSuppressed = false): WaMessage`.
 
-- [ ] **Step 1: Write the failing test** — `tests/Feature/InboxActionsTest.php`
+**R53 ruling — the gate lives in the sender (spec §14 amended).** The pre-flight measured that
+`post()` ALWAYS writes a row (FAILED local / FAILED network / FAILED rejected / SENT), so a gate
+that "refuses" by returning a FAILED row would break the four refuse-tests' zero-OUT-row counts.
+The gate therefore THROWS `SuppressedContactException` before any row write and any HTTP attempt,
+reading the contact fresh by the NORMALISED phone (`WaContact::where('phone', ...)->first()`,
+never creating). ONE named exemption: the STOP confirmation (`allowSuppressed: true` on that
+single AutoResponder call) — the one send the suppression regime owes the contact. The blanket-gate
+RED measurement killed **7** named closed-file rows (6 OptOutFlowTest + AckFlowTest::test_opt_out_message_is_not_acknowledged),
+all on the confirmation send after `optOut()`; the exemption revived all 7. The AutoResponder
+`isOptedOut()` pre-check was DROPPED and the ack send wrapped in catch-and-skip: `ProcessInboundEvent`
+has no try/catch and `$tries = 3`, so an escaping throw would retry the job three times, and keeping
+the pre-check would make the catch un-witnessable (R51 X01 joint redundancy). Recorded side effect:
+an opted-out contact consumes the R46 ack cache key before the gate refuses — harmless, no send,
+the key expires with the window. TOCTOU: no transaction or row lock across the network wait; a
+concurrent opt-out between gate and send can slip one message. The plan sanctions accepting the
+race; accepted and recorded here and in spec §14. Scope honesty: Task 13's importer only records
+historical rows and never calls the sender, so "every caller inherits it" binds the controller, the
+AutoResponder, and any future Laravel send path — not the importer, and not Task 15's Python bench
+(which gets its own fail-closed check against the suppression endpoint).
+
+- [ ] **Step 1: Write the failing test** — `tests/Feature/InboxActionsTest.php` (shipped: 23 rows — the plan's original 8 plus 12 brief witness rows plus 3 R53 fix-round rows):
 
 ```php
 <?php
@@ -6850,6 +6870,7 @@ use App\Models\WaContact;
 use App\Models\WaMessage;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class InboxActionsTest extends TestCase
@@ -6957,23 +6978,255 @@ class InboxActionsTest extends TestCase
         auth()->logout();
         $this->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'x'])->assertRedirect('/login');
     }
+
+    // ---- witness rows owed by the brief (each names the arm it kills) ----
+
+    // W-GUEST2: the plan covers reply only; guests must bounce off template and opt-out too.
+    public function test_a_guest_cannot_post_a_template_or_an_opt_out()
+    {
+        auth()->logout();
+        $this->post('/inbox/' . $this->contact->id . '/template',
+            ['template' => 'etp_opener_brand', 'language' => 'en', 'variables' => ''])->assertRedirect('/login');
+        $this->post('/inbox/' . $this->contact->id . '/opt-out')->assertRedirect('/login');
+        $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
+        $this->assertFalse($this->contact->fresh()->isOptedOut());
+    }
+
+    // W-FLASH: kills the arm that deletes the @if (session('result')) block from thread.blade.php.
+    // Task 11 row 25 seeds errors/old input only -- it never exercises session('result').
+    public function test_a_successful_reply_flashes_sent_inside_the_ok_wrapper()
+    {
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.STAFF1']]], 200)]);
+        $response = $this->from('/inbox/' . $this->contact->id)
+            ->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'Happy to help.']);
+        $this->followRedirects($response)
+            ->assertSee('Sent.')
+            ->assertSee('<div class="ok">Sent.</div>', false);
+    }
+
+    // W-REFERER: kills the arm that replaces back() with redirect('/').
+    public function test_a_reply_redirects_back_to_the_thread_it_came_from()
+    {
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.STAFF1']]], 200)]);
+        $this->from('/inbox/' . $this->contact->id)
+            ->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'Hi'])
+            ->assertRedirect('/inbox/' . $this->contact->id);
+    }
+
+    // W-RERENDER: the request side of Task 11 row 25 -- a real refused POST feeding withErrors +
+    // withInput + old(). Kills the arm that deletes ->withInput() from the window-refusal return.
+    public function test_a_refused_reply_re_renders_the_thread_with_the_error_and_the_old_body()
+    {
+        $this->contact->update(['last_inbound_at' => now()->subHours(30)]);
+        $response = $this->from('/inbox/' . $this->contact->id)
+            ->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'keep me']);
+        $this->followRedirects($response)
+            ->assertSee('The 24-hour reply window is closed. Send an approved template instead.')
+            ->assertSee('<textarea name="body">keep me</textarea>', false);
+        $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
+    }
+
+    // W-WIDTHS: one arm per max: rule -- deleting max:4096 / max:500 / max:10 kills its case.
+    // No stub: an over-wide value must be refused before the sender, and the stray guard makes
+    // any attempt a failure rather than a silent send.
+    public static function overWideProvider(): array
+    {
+        return [
+            'body 4097' => ['reply', ['body' => str_repeat('x', 4097)], 'body'],
+            'variables 501' => ['template',
+                ['template' => 'etp_opener_brand', 'language' => 'en', 'variables' => str_repeat('x', 501)],
+                'variables'],
+            'language 11' => ['template',
+                ['template' => 'etp_opener_brand', 'language' => str_repeat('x', 11), 'variables' => ''],
+                'language'],
+        ];
+    }
+
+    #[DataProvider('overWideProvider')]
+    public function test_over_wide_input_is_rejected_without_sending(string $action, array $payload, string $field)
+    {
+        $this->post('/inbox/' . $this->contact->id . '/' . $action, $payload)
+            ->assertSessionHasErrors($field);
+        $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());
+    }
+
+    // W-COMMA: kills the arm that deletes array_filter from the variables line. The plan's row
+    // covers only the clean single value; a trailing or leading comma must not add an empty parameter.
+    public static function commaVariablesProvider(): array
+    {
+        return ['trailing comma' => ['Jane, '], 'leading comma' => [',Jane']];
+    }
+
+    #[DataProvider('commaVariablesProvider')]
+    public function test_comma_padded_variables_produce_exactly_one_body_parameter(string $variables)
+    {
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.STAFF1']]], 200)]);
+        $this->post('/inbox/' . $this->contact->id . '/template',
+            ['template' => 'etp_opener_brand', 'language' => 'en', 'variables' => $variables])->assertRedirect();
+
+        Http::assertSentCount(1);
+        Http::assertSent(fn ($r) => $r['type'] === 'template'
+            && count($r['template']['components'][1]['parameters']) === 1
+            && $r['template']['components'][1]['parameters'][0]['text'] === 'Jane');
+    }
+
+    // W-IDEM: pins the observable idempotency of optOut()'s early-return (closed code): a second
+    // manual opt-out must not move opted_out_at, and both views must show the silenced state.
+    public function test_a_second_manual_opt_out_does_not_move_the_timestamp()
+    {
+        $this->post('/inbox/' . $this->contact->id . '/opt-out')->assertRedirect();
+        $first = $this->contact->fresh()->opted_out_at;
+        $this->assertNotNull($first);
+
+        $this->post('/inbox/' . $this->contact->id . '/opt-out')->assertRedirect();
+        $second = $this->contact->fresh()->opted_out_at;
+        $this->assertSame($first->format('Y-m-d H:i:s.u'), $second->format('Y-m-d H:i:s.u'));
+
+        $this->get('/inbox/' . $this->contact->id)->assertSee('OPTED OUT (manual');
+        $this->get('/inbox')->assertSee('opted out');
+    }
+
+    // W-REFUSED: kills the arm that flips the FAILED-flash ternary. The stub is the exact shape
+    // post()'s rejected branch parses: error.code, error.error_data.details, error.message.
+    public function test_a_refused_reply_flashes_meta_refused_and_stores_the_failed_row()
+    {
+        Http::fake(['*' => Http::response(['error' => [
+            'message' => 'Re-engagement message', 'code' => 131030,
+            'error_data' => ['details' => 'Message undeliverable'],
+        ]], 400)]);
+        $response = $this->from('/inbox/' . $this->contact->id)
+            ->post('/inbox/' . $this->contact->id . '/reply', ['body' => 'late note']);
+        $this->followRedirects($response)
+            ->assertSee('Meta refused')
+            ->assertSee('Message undeliverable');
+
+        $m = WaMessage::where('direction', WaMessage::OUT)->firstOrFail();
+        $this->assertSame(WaMessage::FAILED, $m->status);
+        $this->assertSame('131030', $m->error_code);
+    }
+
+    // W-OPTFLASH (R53): the opt-out flash copy had no witness -- review arm V4 changed the string
+    // and the whole suite stayed green. Follow the real redirect and pin the exact copy + wrapper.
+    public function test_a_manual_opt_out_flashes_the_confirmation_copy()
+    {
+        $response = $this->from('/inbox/' . $this->contact->id)
+            ->post('/inbox/' . $this->contact->id . '/opt-out');
+        $this->followRedirects($response)
+            ->assertSee('<div class="ok">Marked opted out. No further messages will be sent to this number.</div>', false);
+    }
+
+    // W-TPLFLASH (R53): the template-success flash copy had no witness -- review arm V5 changed
+    // 'Template sent.' and the whole suite stayed green.
+    public function test_a_successful_template_flashes_template_sent_inside_the_ok_wrapper()
+    {
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.STAFF1']]], 200)]);
+        $response = $this->from('/inbox/' . $this->contact->id)
+            ->post('/inbox/' . $this->contact->id . '/template',
+                ['template' => 'etp_welcome_c', 'language' => 'en_US', 'variables' => '']);
+        $this->followRedirects($response)
+            ->assertSee('<div class="ok">Template sent.</div>', false);
+    }
+
+    // W-NAMES (R53): the route NAMES had no witness -- review arm V8 renamed inbox.reply and the
+    // suite stayed green because every POST row uses literal URLs. route() must resolve all three
+    // names to the exact URLs the thread forms post to.
+    public function test_the_three_action_routes_resolve_by_name_to_the_form_urls()
+    {
+        $id = $this->contact->id;
+        $this->assertSame(url('/inbox/' . $id . '/reply'), route('inbox.reply', $id));
+        $this->assertSame(url('/inbox/' . $id . '/template'), route('inbox.template', $id));
+        $this->assertSame(url('/inbox/' . $id . '/opt-out'), route('inbox.optout', $id));
+    }
+
+    public function test_a_refused_template_flashes_meta_refused_with_the_code_and_stores_the_failed_row()
+    {
+        Http::fake(['*' => Http::response(['error' => [
+            'message' => 'Re-engagement message', 'code' => 131030,
+            'error_data' => ['details' => 'Message undeliverable'],
+        ]], 400)]);
+        $response = $this->from('/inbox/' . $this->contact->id)
+            ->post('/inbox/' . $this->contact->id . '/template',
+                ['template' => 'etp_welcome_c', 'language' => 'en_US', 'variables' => '']);
+        $this->followRedirects($response)
+            ->assertSee('Meta refused (')
+            ->assertSee('131030')
+            ->assertSee('Message undeliverable');
+
+        $m = WaMessage::where('direction', WaMessage::OUT)->firstOrFail();
+        $this->assertSame(WaMessage::FAILED, $m->status);
+        $this->assertSame('131030', $m->error_code);
+    }
 }
 ```
 
-- [ ] **Step 2: Run it** — expected FAIL 405 for all three POSTs.
+- [ ] **Step 2: Run it** — measured RED: `8 failed (8 assertions)`. The plan's original prediction
+"FAIL 405 for all three POSTs" was wrong in the code: this Laravel build answers an unregistered POST
+under a GET-only path with **404**, so the four redirect-expecting rows died on 404 and the four
+refuse-rows died on `Session is missing expected key [errors]`. Reported as measured, not predicted.
 
-- [ ] **Step 3: Add the three actions to `InboxController`**, plus imports `use App\Services\WhatsAppSender;`, `use Illuminate\Support\Carbon;`, `use Illuminate\Validation\Rule;`:
+- [ ] **Step 3: Add the three actions to `InboxController`** — shipped file (D2: window check inline
+in `reply()` only; `blockReason()` never created; no `isOptedOut()` branch — opt-out refusal surfaces
+only via the caught `SuppressedContactException` translated into the `window` error bag. D3: imports
+are exactly `WaContact`, `WaMessage`, `SuppressedContactException`, `WhatsAppSender`, `Request`,
+`Rule` — the original step's `use Illuminate\Support\Carbon;` was unused and dropped):
 
 ```php
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\WaContact;
+use App\Models\WaMessage;
+use App\Services\SuppressedContactException;
+use App\Services\WhatsAppSender;
+use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
+
+class InboxController extends Controller
+{
+    public function contacts(Request $request)
+    {
+        $q = trim((string) $request->query('q', ''));
+
+        $contacts = WaContact::query()
+            ->when($q !== '', function ($query) use ($q) {
+                $query->where(function ($inner) use ($q) {
+                    $inner->where('phone', 'like', '%' . $q . '%')
+                          ->orWhere('profile_name', 'like', '%' . $q . '%');
+                });
+            })
+            ->withCount(['messages as inbound_count' => fn ($q2) => $q2->where('direction', WaMessage::IN)])
+            ->withCount(['messages as outbound_count' => fn ($q2) => $q2->where('direction', WaMessage::OUT)])
+            ->orderByRaw('coalesce(last_inbound_at, created_at) desc')
+            ->orderByDesc('id')
+            ->paginate(30)
+            ->withQueryString();
+
+        return view('inbox.contacts', ['contacts' => $contacts, 'q' => $q]);
+    }
+
+    public function thread(WaContact $contact)
+    {
+        return view('inbox.thread', [
+            'contact' => $contact,
+            'messages' => $contact->messages()->get(),
+            'choices' => config('whatsapp.template_choices'),
+        ]);
+    }
+
     public function reply(Request $request, WaContact $contact, WhatsAppSender $sender)
     {
         $data = $request->validate(['body' => ['required', 'string', 'max:4096']]);
 
-        if ($blocked = $this->blockReason($contact)) {
-            return back()->withInput()->withErrors(['window' => $blocked]);
+        if (!$contact->windowOpen()) {
+            return back()->withInput()->withErrors(['window' => 'The 24-hour reply window is closed. Send an approved template instead.']);
         }
 
-        $message = $sender->sendText($contact->phone, trim($data['body']));
+        try {
+            $message = $sender->sendText($contact->phone, trim($data['body']));
+        } catch (SuppressedContactException $e) {
+            return back()->withInput()->withErrors(['window' => $e->getMessage()]);
+        }
 
         return back()->with('result', $message->status === WaMessage::FAILED
             ? 'Meta refused: ' . $message->error_title
@@ -6988,14 +7241,14 @@ class InboxActionsTest extends TestCase
             'variables' => ['nullable', 'string', 'max:500'],
         ]);
 
-        if ($blocked = $this->blockReason($contact, templateAllowed: true)) {
-            return back()->withInput()->withErrors(['window' => $blocked]);
-        }
-
         $variables = array_values(array_filter(array_map('trim',
             explode(',', (string) ($data['variables'] ?? '')))));
 
-        $message = $sender->sendTemplate($contact->phone, $data['template'], $data['language'], $variables);
+        try {
+            $message = $sender->sendTemplate($contact->phone, $data['template'], $data['language'], $variables);
+        } catch (SuppressedContactException $e) {
+            return back()->withInput()->withErrors(['window' => $e->getMessage()]);
+        }
 
         return back()->with('result', $message->status === WaMessage::FAILED
             ? 'Meta refused (' . $message->error_code . '): ' . $message->error_title
@@ -7008,27 +7261,677 @@ class InboxActionsTest extends TestCase
 
         return back()->with('result', 'Marked opted out. No further messages will be sent to this number.');
     }
-
-    private function blockReason(WaContact $contact, bool $templateAllowed = false): ?string
-    {
-        if ($contact->isOptedOut()) {
-            return 'This contact has opted out. Nothing may be sent to this number.';
-        }
-
-        if (!$templateAllowed && !$contact->windowOpen()) {
-            return 'The 24-hour reply window is closed. Send an approved template instead.';
-        }
-
-        return null;
-    }
+}
 ```
 
-- [ ] **Step 4: Register the POST routes** inside the `auth` group in `routes/web.php`:
+- [ ] **Step 4: Build the suppression gate (D1)** — create `app/Services/SuppressedContactException.php`:
 
 ```php
+<?php
+
+namespace App\Services;
+
+class SuppressedContactException extends \RuntimeException
+{
+    public function __construct(string $message = 'This contact has opted out. Nothing may be sent to this number.')
+    {
+        parent::__construct($message);
+    }
+}
+```
+
+Gate in `WhatsAppSender` (shipped file — the gate sits in `post()` after phone normalisation, before
+`fromPhone()`, any row write, and any HTTP attempt; `allowSuppressed` threaded through both public
+methods). Build it FIRST without the exemption and run the closed OptOutFlowTest/AckFlowTest: the
+7-row kill listed in the R53 ruling above is the measurement that justifies the exemption; then add
+the flag and watch all 7 revive:
+
+```php
+<?php
+
+namespace App\Services;
+
+use App\Models\WaContact;
+use App\Models\WaMessage;
+use Illuminate\Http\Client\Factory;
+
+class WhatsAppSender
+{
+    public function __construct(private Factory $http)
+    {
+    }
+
+    public function sendText(string $phone, string $text, bool $autoReply = false,
+                             bool $allowSuppressed = false): WaMessage
+    {
+        return $this->post(
+            ['messaging_product' => 'whatsapp', 'to' => $phone, 'type' => 'text',
+             'text' => ['preview_url' => false, 'body' => $text]],
+            $phone,
+            ['direction' => WaMessage::OUT, 'type' => 'text', 'body' => $text,
+             'auto_reply' => $autoReply],
+            $allowSuppressed,
+        );
+    }
+
+    public function sendTemplate(string $phone, string $name, string $lang,
+                                 array $variables = [], bool $autoReply = false,
+                                 bool $allowSuppressed = false): WaMessage
+    {
+        $components = [];
+        $image = (string) (config('whatsapp.header_images')[$name] ?? '');
+        if ($image !== '') {
+            $components[] = ['type' => 'header', 'parameters' => [
+                ['type' => 'image', 'image' => ['link' => $image]]]];
+        }
+        if ($variables !== []) {
+            $components[] = ['type' => 'body', 'parameters' => array_map(
+                fn ($v) => ['type' => 'text', 'text' => (string) $v], $variables)];
+        }
+
+        $template = ['name' => $name, 'language' => ['code' => $lang]];
+        if ($components !== []) {
+            $template['components'] = $components;
+        }
+
+        return $this->post(
+            ['messaging_product' => 'whatsapp', 'to' => $phone, 'type' => 'template',
+             'template' => $template],
+            $phone,
+            ['direction' => WaMessage::OUT, 'type' => 'template', 'template_name' => $name,
+             'template_lang' => $lang, 'auto_reply' => $autoReply],
+            $allowSuppressed,
+        );
+    }
+
+    private static function str(mixed $v, int $max): string
+    {
+        $s = match (true) {
+            is_string($v) => $v,
+            is_int($v) || is_float($v) => (string) $v,
+            default => '',
+        };
+
+        return mb_substr($s, 0, $max);
+    }
+
+    private function post(array $payload, string $phone, array $attrs,
+                          bool $allowSuppressed = false): WaMessage
+    {
+        // R35: the contact row and the payload have to agree. fromPhone() normalises internally, so
+        // the first draft stored digits while sending the caller's punctuation -- Meta answers that
+        // with a 400 for a contact we filed cleanly. Normalising once, here, is the R32 rule pointed
+        // at the outbound direction.
+        $phone = WaContact::digitsOnly($phone);
+        $payload['to'] = $phone;
+
+        // D1: the suppression gate. Fresh read by the NORMALISED phone, no contact creation, no row
+        // write and no HTTP attempt before it. Throws instead of recording a FAILED row because the
+        // refuse-tests assert zero OUT rows. allowSuppressed is the ONE exemption: the opt-out
+        // confirmation the AutoResponder owes the contact after a STOP. TOCTOU: a concurrent opt-out
+        // between this read and the send can slip one message; the plan sanctions accepting the race
+        // (recorded in the ledger).
+        $gateContact = WaContact::where('phone', $phone)->first();
+        if (!$allowSuppressed && $gateContact?->isOptedOut()) {
+            throw new SuppressedContactException();
+        }
+
+        $contact = WaContact::fromPhone($phone);
+        $token = (string) config('whatsapp.token', '');
+        $phoneId = (string) config('whatsapp.phone_id', '');
+
+        // R35: an unconfigured phone number id is the same kind of "we do not know who is sending" as
+        // an unconfigured token, and without this guard the app still makes an authenticated HTTPS
+        // request to .../v20.0//messages. Nothing goes out when either is missing.
+        if ($token === '' || $phoneId === '') {
+            return WaMessage::record($attrs + [
+                'wa_contact_id' => $contact->id, 'meta_id' => null,
+                'status' => WaMessage::FAILED, 'status_at' => now(),
+                'error_code' => 'local',
+                'error_title' => $token === '' ? 'no access token configured' : 'no phone number id configured',
+                'sent_at' => now(), 'raw' => $payload,
+            ]);
+        }
+
+        $url = rtrim((string) config('whatsapp.api_base'), '/') . '/' . $phoneId . '/messages';
+
+        try {
+            // R33: ->timeout() is the option. post() is declared post(string $url, $data = [])
+            // (vendor PendingRequest:888), so a third argument is accepted by PHP and thrown away --
+            // the first draft looked like it waited 20 seconds and actually waited Laravel's own
+            // default of 30 (vendor PendingRequest:269).
+            $res = $this->http->withToken($token)->asJson()->timeout(20)->post($url, $payload);
+        } catch (\Throwable $e) {
+            return WaMessage::record($attrs + [
+                'wa_contact_id' => $contact->id, 'meta_id' => null,
+                'status' => WaMessage::FAILED, 'status_at' => now(),
+                'error_code' => 'network', 'error_title' => self::str($e->getMessage(), 255),
+                'sent_at' => now(), 'raw' => $payload,
+            ]);
+        }
+
+        // R34: Meta's response is external input too -- in shape, in presence and in range -- and
+        // every value below lands in a bounded column. data_get() is the null-safe reader (measured:
+        // a scalar `messages`, a null body and a missing key all return null with no warning), and
+        // str() is the width. `(string) ['a']` would have emitted `Warning: Array to string
+        // conversion`, which HandleExceptions::handleError (vendor:75-77) turns into an ErrorException
+        // in every environment -- i.e. the sender throwing at its caller, which the deliverable
+        // forbids -- and a 400-character `error.message` into error_title(255) is the 1406 that
+        // sqlite lets the suite forget about (the round-1 review measured both widths on MariaDB).
+        $json = $res->json() ?? [];
+        $wamid = self::str(data_get($json, 'messages.0.id'), 128);
+
+        if ($res->failed() || $wamid === '') {
+            $code = self::str(data_get($json, 'error.code'), 12);
+            $title = self::str(data_get($json, 'error.error_data.details'), 255)
+                ?: self::str(data_get($json, 'error.message'), 255);
+
+            return WaMessage::record($attrs + [
+                'wa_contact_id' => $contact->id, 'meta_id' => null,
+                'status' => WaMessage::FAILED, 'status_at' => now(),
+                'error_code' => $code === '' ? (string) $res->status() : $code,
+                'error_title' => $title === '' ? 'send rejected' : $title,
+                'sent_at' => now(), 'raw' => $payload,
+            ]);
+        }
+
+        return WaMessage::record($attrs + [
+            'wa_contact_id' => $contact->id, 'meta_id' => $wamid,
+            'status' => WaMessage::SENT, 'status_at' => now(),
+            'sent_at' => now(), 'raw' => $payload,
+        ]);
+    }
+}
+```
+
+`AutoResponder` (shipped file — STOP confirmation carries `allowSuppressed: true`; the old
+`isOptedOut()` pre-check is gone; the ack send is wrapped in catch-and-skip):
+
+```php
+<?php
+
+namespace App\Services;
+
+use App\Models\WaContact;
+use App\Models\WaMessage;
+use App\Support\OptOutKeywords;
+use Illuminate\Support\Facades\Cache;
+
+class AutoResponder
+{
+    public function __construct(private WhatsAppSender $sender)
+    {
+    }
+
+    public function handle(WaMessage $in, ?string $buttonId = null): void
+    {
+        if ($in->direction !== WaMessage::IN) {
+            return;
+        }
+
+        /** @var WaContact $contact */
+        $contact = $in->contact;
+
+        if (OptOutKeywords::matches($in->body, $buttonId)) {
+            $wasSilenced = $contact->isOptedOut();
+            $contact->optOut('inbound_keyword');
+            $text = (string) config('whatsapp.opt_out_text', '');
+            if (!$wasSilenced && $text !== '') {
+                // D1: the ONE exemption to the sender's suppression gate -- the confirmation the
+                // suppression regime owes the contact after their own STOP.
+                $this->sender->sendText($contact->phone, $text, autoReply: true, allowSuppressed: true);
+            }
+
+            return;
+        }
+
+        $this->acknowledge($contact, $in);
+    }
+
+    private function acknowledge(WaContact $contact, WaMessage $in): void
+    {
+        $text = (string) config('whatsapp.ack_text', '');
+        if ($text === '') {
+            return;
+        }
+
+        $hours = (int) config('whatsapp.window_hours', 24);
+        $at = $in->sent_at;
+
+        // R46: exclude the row this job just wrote. ProcessInboundEvent stores the inbound before it
+        // calls the responder, so without this the window query finds the message's own row and no ack
+        // is ever sent. Measured, not reasoned about.
+        $alreadyTalking = WaMessage::where('wa_contact_id', $contact->id)
+            ->where('direction', WaMessage::IN)
+            ->where('id', '!=', $in->id)
+            ->where('sent_at', '>=', $at->copy()->subHours($hours))
+            ->where('sent_at', '<', $at->copy()->addSecond())
+            ->exists();
+        if ($alreadyTalking) {
+            return;
+        }
+
+        // The race guard. Atomic on the production store, not on the test store -- see R46.
+        if (!Cache::add('wa-ack-' . $contact->id, 1, now()->addHours($hours))) {
+            return;
+        }
+
+        // D1/F5b: the sender's gate is the single enforcement point for suppression; this catch is the
+        // single translation point. The pre-check that used to sit in handle() is gone -- keeping it
+        // would make this catch un-witnessable (R51 X01 joint redundancy). ProcessInboundEvent has no
+        // try/catch and $tries = 3, so an escaping throw would retry the job three times. Known side
+        // effect: an opted-out contact consumes the R46 cache key above before the gate refuses;
+        // harmless, no send, and the key expires with the window.
+        try {
+            $this->sender->sendText($contact->phone, $text, autoReply: true);
+        } catch (SuppressedContactException) {
+            return;
+        }
+    }
+}
+```
+
+- [ ] **Step 5: Register the POST routes** inside the `auth` group in `routes/web.php` (shipped file):
+
+```php
+<?php
+
+use App\Http\Controllers\Auth\LoginController;
+use App\Http\Controllers\InboxController;
+use App\Http\Controllers\MachineController;
+use App\Http\Controllers\WaWebhookController;
+use Illuminate\Support\Facades\Route;
+
+Route::get('/wa/webhook', [WaWebhookController::class, 'verify'])
+    ->withoutMiddleware('web')
+    ->name('wa.webhook.verify');
+Route::post('/wa/webhook', [WaWebhookController::class, 'ingest'])
+    ->withoutMiddleware('web')
+    ->name('wa.webhook.ingest');
+
+Route::middleware('wa.bearer')->group(function () {
+    Route::get('/wa/suppressions', [MachineController::class, 'suppressions'])
+        ->withoutMiddleware('web')
+        ->name('wa.suppressions');
+    Route::post('/inbound/record-send', [MachineController::class, 'recordSend'])
+        ->withoutMiddleware('web')
+        ->name('wa.record_send');
+});
+
+Route::get('/login', [LoginController::class, 'show'])->middleware('guest')->name('login');
+Route::post('/login', [LoginController::class, 'store'])->middleware('throttle:5,1');
+Route::post('/logout', [LoginController::class, 'destroy'])->name('logout');
+
+Route::middleware('auth')->group(function () {
+    Route::get('/', fn () => redirect('/inbox'))->name('home');
+    Route::get('/inbox', [InboxController::class, 'contacts'])->name('inbox');
+    Route::get('/inbox/{contact}', [InboxController::class, 'thread'])->name('inbox.thread');
     Route::post('/inbox/{contact}/reply', [InboxController::class, 'reply'])->name('inbox.reply');
     Route::post('/inbox/{contact}/template', [InboxController::class, 'template'])->name('inbox.template');
     Route::post('/inbox/{contact}/opt-out', [InboxController::class, 'optOut'])->name('inbox.optout');
+});
+```
+
+- [ ] **Step 6: Show the flash result in the thread view** — `resources/views/inbox/thread.blade.php`
+(shipped file; the `@if (session('result'))` block sits immediately after the `<h2 ...>` line. The
+original plan duplicated this step verbatim at two consecutive lines; the duplicate was deleted in
+the R53 re-sync):
+
+```blade
+@extends('layout')
+@section('content')
+<p class="muted"><a href="/inbox">All contacts</a></p>
+<h2 style="margin:0">{{ $contact->display_name() }} <span class="muted">+{{ $contact->phone }}</span></h2>
+@if (session('result'))
+  <div class="ok">{{ session('result') }}</div>
+@endif
+<p class="muted">
+  {{ $contact->isOptedOut() ? 'OPTED OUT (' . $contact->opt_out_source . ' ' . $contact->opted_out_at?->toDayDateTimeString() . ')' : ($contact->windowOpen() ? 'reply window open' : 'reply window closed - approved template required') }}
+</p>
+
+<div style="background:#fff;border:1px solid var(--line);border-radius:10px;padding:14px;margin:14px 0">
+@forelse ($messages as $m)
+  <div class="bubble {{ $m->direction === 'in' ? 'in' : 'out' }}">
+    @if ($m->direction === 'out')
+      <div class="muted" style="font-size:12px">
+        {{ $m->sent_at->toDayDateTimeString() }}
+        @if ($m->type === 'template') &middot; template {{ $m->template_name }} ({{ $m->template_lang }}) @endif
+        @if ($m->status) &middot; {{ $m->status }} @endif
+      </div>
+    @endif
+    {{ $m->body ?? '(' . $m->type . ' message - text not stored here)' }}
+    @if ($m->status === 'failed')
+      <div class="err">FAILED {{ $m->error_code }}: {{ $m->error_title }}</div>
+    @endif
+    @if ($m->auto_reply)
+      <div class="auto">automatic</div>
+    @endif
+    @if ($m->direction === 'in')
+      <div class="muted" style="font-size:12px">{{ $m->sent_at->toDayDateTimeString() }}</div>
+    @endif
+  </div>
+@empty
+  <p class="muted">Nothing here yet.</p>
+@endforelse
+</div>
+
+<form method="POST" action="/inbox/{{ $contact->id }}/reply">
+  @csrf
+  <label class="muted">Reply (free-form, needs an open window)</label>
+  <textarea name="body">{{ old('body') }}</textarea>
+  @error('body')<div class="err">{{ $message }}</div>@enderror
+  @foreach ($errors->get('window') as $e) <div class="err">{{ $e }}</div> @endforeach
+  <div style="margin-top:8px"><button type="submit">Send reply</button></div>
+</form>
+
+<form method="POST" action="/inbox/{{ $contact->id }}/template" style="margin-top:18px">
+  @csrf
+  <label class="muted">Approved template (works outside the window)</label>
+  <div>
+    <select name="template">
+      @foreach ($choices as $choice) <option value="{{ $choice }}">{{ $choice }}</option> @endforeach
+    </select>
+    <input name="language" value="en" size="6" placeholder="lang">
+    <input name="variables" value="{{ $contact->profile_name }}" size="24" placeholder="body variables, comma separated">
+  </div>
+  @foreach ($errors->get('template') as $e) <div class="err">{{ $e }}</div> @endforeach
+  <div style="margin-top:8px"><button type="submit">Send template</button></div>
+</form>
+
+<form method="POST" action="/inbox/{{ $contact->id }}/opt-out" style="margin-top:18px">
+  @csrf
+  <button type="submit" style="background:#9aa4b2">Mark opted out</button>
+  <span class="muted">stops every automatic message to this number</span>
+</form>
+@endsection
+```
+
+- [ ] **Step 7: Sender gate witnesses** — `tests/Feature/WhatsAppSenderTest.php` (shipped file; G1–G3
+from the brief, G4 from the R53 fix round — the template-path exemption had no witness until G4):
+
+```php
+<?php
+
+namespace Tests\Feature;
+
+use App\Models\WaContact;
+use App\Models\WaMessage;
+use App\Services\SuppressedContactException;
+use App\Services\WhatsAppSender;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
+use Tests\TestCase;
+
+class WhatsAppSenderTest extends TestCase
+{
+    use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        config(['whatsapp.phone_id' => '1427706937088002', 'whatsapp.token' => 'tok-test']);
+        Http::preventStrayRequests();
+    }
+
+    public function test_send_text_posts_to_graph_and_records_the_wamid()
+    {
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.OUT9']]], 200)]);
+
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'Hello there');
+
+        $this->assertSame(WaMessage::OUT, $m->direction);
+        $this->assertSame(WaMessage::SENT, $m->status);
+        $this->assertSame('wamid.OUT9', $m->meta_id);
+        $this->assertSame('Hello there', $m->body);
+        $this->assertFalse($m->auto_reply);
+
+        Http::assertSent(fn ($r) => $r['type'] === 'text'
+            && $r['to'] === '18479043315'
+            && $r['text']['body'] === 'Hello there'
+            && $r['messaging_product'] === 'whatsapp'
+            && $r->url() === 'https://graph.facebook.com/v20.0/1427706937088002/messages');
+    }
+
+    public function test_a_400_is_stored_as_failed_with_the_meta_error()
+    {
+        Http::fake(['*' => Http::response(['error' => [
+            'message' => 'Re-engagement message', 'code' => 131030,
+            'error_data' => ['details' => 'Message undeliverable'],
+        ]], 400)]);
+
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'Late reply');
+
+        $this->assertSame(WaMessage::FAILED, $m->status);
+        $this->assertSame('131030', $m->error_code);
+        $this->assertSame('Message undeliverable', $m->error_title);
+        $this->assertNull($m->meta_id);
+        $this->assertNotNull($m->id, 'a failed send must still be visible in the thread');
+    }
+
+    public function test_missing_token_fails_locally_without_calling_graph()
+    {
+        config(['whatsapp.token' => '']);
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'x');
+        $this->assertSame(WaMessage::FAILED, $m->status);
+        $this->assertSame('local', $m->error_code);
+        $this->assertSame('no access token configured', $m->error_title);
+    }
+
+    public function test_template_send_re_attaches_the_approved_header_image()
+    {
+        config(['whatsapp.header_images' => ['etp_opener_brand' => 'https://example.test/logo.png']]);
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.OUT10']]], 200)]);
+
+        app(WhatsAppSender::class)->sendTemplate('18479043315', 'etp_opener_brand', 'en', ['Sam']);
+
+        Http::assertSent(function ($r) {
+            $c = $r['template']['components'];
+
+            return $c[0] === ['type' => 'header', 'parameters' => [[
+                'type' => 'image', 'image' => ['link' => 'https://example.test/logo.png']]]]
+                && $c[1]['type'] === 'body'
+                && $c[1]['parameters'][0]['text'] === 'Sam'
+                && $r['template']['language']['code'] === 'en';
+        });
+        $m = WaMessage::where('meta_id', 'wamid.OUT10')->firstOrFail();
+        $this->assertSame('etp_opener_brand', $m->template_name);
+        $this->assertSame('en', $m->template_lang);
+    }
+
+    public function test_template_without_variables_sends_no_components()
+    {
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.OUT11']]], 200)]);
+        app(WhatsAppSender::class)->sendTemplate('18479043315', 'etp_welcome_c', 'en_US');
+        Http::assertSent(fn ($r) => !array_key_exists('components', $r['template']));
+    }
+
+    public function test_a_punctuated_phone_is_stored_and_sent_as_digits()
+    {
+        // R35: the payload and the contact row must not disagree about who this is.
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.OUT12']]], 200)]);
+
+        $m = app(WhatsAppSender::class)->sendText('+1 (847) 904-3315', 'Hi');
+
+        Http::assertSent(fn ($r) => $r['to'] === '18479043315');
+        $this->assertSame('18479043315', $m->contact->phone);
+        $this->assertSame('18479043315', $m->raw['to'], 'the stored payload is what was sent');
+    }
+
+    public function test_an_unconfigured_phone_id_records_a_local_failure_without_calling_graph()
+    {
+        // R35: `.../v20.0//messages` is still an authenticated request. Not knowing which number we
+        // are has to stop us before the network, exactly as a missing token does.
+        config(['whatsapp.phone_id' => '']);
+        Http::fake(['*' => Http::response([], 200)]);
+
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'x');
+
+        Http::assertNothingSent();
+        $this->assertSame(WaMessage::FAILED, $m->status);
+        $this->assertSame('local', $m->error_code);
+        $this->assertSame('no phone number id configured', $m->error_title);
+    }
+
+    public function test_a_graph_body_that_is_shaped_wrong_is_recorded_not_thrown()
+    {
+        // R34: `messages.0.id` as a list is the shape that used to reach a `(string)` cast. There is
+        // no id, so it is a failure, and its code falls back to the HTTP status.
+        Http::fake(['*' => Http::response(['messages' => [['id' => ['w', 'x']]]], 200)]);
+
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'x');
+
+        $this->assertSame(WaMessage::FAILED, $m->status);
+        $this->assertNull($m->meta_id);
+        $this->assertSame('200', $m->error_code);
+        $this->assertSame('send rejected', $m->error_title);
+    }
+
+    public function test_a_connection_failure_is_recorded_as_network_without_throwing()
+    {
+        // R38: the network is one of the four outcomes the deliverable names, and until now nothing
+        // reached the catch -- every fake answered, and the two config guards return before the
+        // request. A cURL error message is unbounded text that lands in error_title(255), so the same
+        // reader caps it here as it does Meta's own message.
+        Http::fake(['*' => fn () => throw new \Illuminate\Http\Client\ConnectionException(
+            str_repeat('x', 400))]);
+
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'x');
+
+        $this->assertSame(WaMessage::FAILED, $m->status);
+        $this->assertSame('network', $m->error_code);
+        $this->assertSame(255, mb_strlen($m->error_title));
+        $this->assertNull($m->meta_id);
+    }
+
+    public function test_error_details_that_are_shaped_wrong_fall_back_to_the_message()
+    {
+        // R34 again, one branch further down: ?? picks the first operand whenever it is not null, so
+        // an error_data.details that arrives as a list was kept, turned into '' by str(), and the
+        // readable error.message next to it was never tried. The row said "send rejected" when Meta
+        // had actually told us why.
+        Http::fake(['*' => Http::response(['error' => [
+            'message' => 'Limitation was applied due to poor quality rating',
+            'code' => 131056,
+            'error_data' => ['details' => ['unexpected', 'shape']],
+        ]], 400)]);
+
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'x');
+
+        $this->assertSame('131056', $m->error_code);
+        $this->assertSame('Limitation was applied due to poor quality rating', $m->error_title);
+    }
+
+    public function test_error_text_from_graph_is_cut_to_the_column_it_lands_in()
+    {
+        // R34: error_title is varchar(255) and both Meta's message and cURL's message are unbounded.
+        // On sqlite an over-long insert succeeds, which is how the suite would forget this bug, so
+        // the assertion is on the stored length -- the part a caller can observe on either engine.
+        Http::fake(['*' => Http::response(['error' => [
+            'message' => str_repeat('x', 400), 'code' => 131047,
+        ]], 400)]);
+
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'x');
+
+        $this->assertSame(WaMessage::FAILED, $m->status);
+        $this->assertSame('131047', $m->error_code);
+        $this->assertSame(255, mb_strlen($m->error_title));
+    }
+
+    // ---- D1 gate witnesses (G1-G3). The rows above are the witness that a non-opted-out
+    // contact is unaffected; they are not duplicated here. ----
+
+    // G1: kills "gate deleted" (a send happens -> the stray guard fires) and "gate moved after
+    // record()" (a row exists). No stub: any HTTP attempt is a failure, not an answer.
+    public function test_send_text_to_an_opted_out_contact_throws_before_any_row_or_request()
+    {
+        WaContact::factory()->create(['phone' => '18479043315'])->optOut('manual');
+
+        try {
+            app(WhatsAppSender::class)->sendText('18479043315', 'x');
+            $this->fail('SuppressedContactException was not thrown');
+        } catch (SuppressedContactException $e) {
+            $this->assertSame('This contact has opted out. Nothing may be sent to this number.',
+                $e->getMessage());
+        }
+
+        $this->assertSame(0, WaMessage::count(), 'the gate refuses before any row write');
+        Http::assertNothingSent();
+    }
+
+    // G2: the same refusal for the template path.
+    public function test_send_template_to_an_opted_out_contact_throws_before_any_row_or_request()
+    {
+        WaContact::factory()->create(['phone' => '18479043315'])->optOut('inbound_keyword');
+
+        try {
+            app(WhatsAppSender::class)->sendTemplate('18479043315', 'etp_welcome_c', 'en_US');
+            $this->fail('SuppressedContactException was not thrown');
+        } catch (SuppressedContactException $e) {
+            $this->assertSame('This contact has opted out. Nothing may be sent to this number.',
+                $e->getMessage());
+        }
+
+        $this->assertSame(0, WaMessage::count(), 'the gate refuses before any row write');
+        Http::assertNothingSent();
+    }
+
+    // G3: kills "exemption flag ignored in the gate" -- the one send the suppression regime
+    // owes the contact must still go out and be recorded.
+    public function test_send_text_with_allow_suppressed_sends_and_records_for_an_opted_out_contact()
+    {
+        WaContact::factory()->create(['phone' => '18479043315'])->optOut('inbound_keyword');
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.EXEMPT1']]], 200)]);
+
+        $m = app(WhatsAppSender::class)->sendText('18479043315', 'You are opted out.',
+            autoReply: true, allowSuppressed: true);
+
+        $this->assertSame(WaMessage::SENT, $m->status);
+        $this->assertSame('wamid.EXEMPT1', $m->meta_id);
+        $this->assertTrue($m->auto_reply);
+        $this->assertSame(1, WaMessage::count());
+        Http::assertSent(fn ($r) => $r['to'] === '18479043315' && $r['text']['body'] === 'You are opted out.');
+    }
+
+    // G4 (R53): sendTemplate's allowSuppressed flag had no witness -- review arm V7 hard-coded
+    // false in its post() call and the suite stayed green (G3 only exercises sendText).
+    public function test_send_template_with_allow_suppressed_sends_and_records_for_an_opted_out_contact()
+    {
+        WaContact::factory()->create(['phone' => '18479043315'])->optOut('inbound_keyword');
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.EXEMPT2']]], 200)]);
+
+        $m = app(WhatsAppSender::class)->sendTemplate('18479043315', 'etp_welcome_c', 'en_US',
+            [], autoReply: true, allowSuppressed: true);
+
+        $this->assertSame(WaMessage::SENT, $m->status);
+        $this->assertSame('wamid.EXEMPT2', $m->meta_id);
+        $this->assertSame(1, WaMessage::count());
+    }
+}
+```
+
+- [ ] **Step 8: Run the touched classes**
+
+```bash
+php artisan test tests/Feature/InboxActionsTest.php tests/Feature/WhatsAppSenderTest.php
+```
+
+Expected: InboxActionsTest 23 passed, WhatsAppSenderTest 15 passed (the original "8 passed" was
+recomputed at re-sync: 8 plan rows + 12 brief witness rows + 3 R53 rows; sender 11 + G1–G4).
+
+- [ ] **Step 9: Run the whole suite**
+
+```bash
+php artisan test
+```
+
+Expected: **294 passed (749 assertions)** — 267 Task-11 baseline + 23 InboxActionsTest + 4 new
+WhatsAppSenderTest rows. Fix any regression in this task rather than leaving it for later.
+
+- [ ] **Step 10: Commit** (every path the task owns — the original list omitted the four gate paths):
+
+```bash
+git add app/Http/Controllers/InboxController.php app/Services/WhatsAppSender.php app/Services/AutoResponder.php app/Services/SuppressedContactException.php resources/views/inbox/thread.blade.php routes/web.php tests/Feature/InboxActionsTest.php tests/Feature/WhatsAppSenderTest.php
+git commit -m "feat: staff reply, template send and manual opt-out"
 ```
 
 **R41 -- this block is corrected above, in the same pass that corrected Task 7's.** The first draft
@@ -7050,55 +7953,23 @@ A whole-plan sweep for this shape (Tasks 8-16, every `Http` fence) found only tw
 one and Task 8's `AckFlowTest`, both corrected. Tasks 9, 10, 11, 13 and 14 use no `Http` facade at all;
 Task 15 is Python and mocks `urlopen` directly; Task 16 has no test fences.
 
-- [ ] **Step 5: Show the flash result in the thread view.** In `resources/views/inbox/thread.blade.php`, immediately after the `<h2 ...>` line add:
-
-- [ ] **Step 5: Show the flash result in the thread view.** In `resources/views/inbox/thread.blade.php`, immediately after the `<h2 ...>` line add:
-
-```blade
-@if (session('result'))
-  <div class="ok">{{ session('result') }}</div>
-@endif
-```
-
-- [ ] **Step 6: Run the test**
-
-```bash
-php artisan test tests/Feature/InboxActionsTest.php
-```
-
-Expected: 8 passed.
-
-- [ ] **Step 7: Run the whole suite**
-
-```bash
-php artisan test
-```
-
-Expected: all green. Fix any regression in this task rather than leaving it for later.
-
-- [ ] **Step 8: Commit**
-
-```bash
-git add app/Http/Controllers/InboxController.php resources/views/inbox/thread.blade.php routes/web.php tests/Feature/InboxActionsTest.php
-git commit -m "feat: staff reply, template send and manual opt-out"
-```
-
-**Open for Task 12, carried from the Task 7 review.** Spec §14 "Errors and edge cases worth naming", lines
-246-247 (the citation previously read "§Risk table, lines 242-243", which is the 24-hour-window bullet and not
-this one -- fixed in the R47 round), says an
-in-flight send to a contact who opted out "is refused at the gate in `WhatsAppSender`, which re-reads
-`opted_out_at` in the same transaction that writes the row." The shipped `WhatsAppSender` has no such read
-(verified in this worktree: a grep for `opted_out` and `isOptedOut` in `app/Services/WhatsAppSender.php`
-returns nothing), and this task's Step 3 puts the check in `InboxController` instead, outside any
-transaction. One of the two is the design: either move the gate into the sender, so every caller -- Task 13's
-importer, Task 15's bench, a future cron -- inherits it, or amend the spec sentence to say where the gate
-actually lives. Decide it here rather than leaving a second, divergent opinion about suppression enforcement
-between the two documents; that is the same mistake R28, R34 and R39 were written against. The TOCTOU half of
-the spec sentence is real but cheap: read `opted_out_at` after the row is locked, or accept the race and say
-so in the ledger.
+**R53 review record (replaces the "Open for Task 12" spec-vs-code question — decided, not carried).**
+The implementer completed the task and its 17-arm battery (17/17 killed, every arm occ=1 / landed /
+restored bytes+sha256, evidence `Temp/task12-arms/results-final.json`), then the session hit the account
+credit limit and the Explore/Plan/general-purpose agent types were removed. The controller review ran
+INLINE with the same criteria — **no independent subagent review was performed for Task 12**; the
+controller's own 8-arm battery (`Temp/t12review/`) reproduced three claimed kill-sets exactly (gate
+deleted → 5, flash deleted → 3, exemption removed → 7) and confirmed five GREEN residuals. Fix round
+shipped four witness rows (W-OPTFLASH, W-TPLFLASH, W-NAMES, G4); re-run arms each killed exactly its one
+new row (`Temp/t12review2/`). Residual dispositions: TOCTOU accepted-recorded; controller `trim` kept
+as R51 X01 joint redundancy with TrimStrings — the report's proposed padded-body row was REJECTED as a
+wrong-reason witness (it would pass with the trim deleted); R46 cache-key consumption recorded harmless.
+Cosmetic note: `template()`'s FAILED flash renders `Meta refused (): <title>` when `error_code` is null
+(network failure) — left as shipped, future polish. Full record: `.superpowers/sdd/2026-11-06-wa-webhook-inbox/r53-review.md`.
+Spec §14's "same transaction that writes the row" sentence was amended to the shipped fresh-read gate +
+accepted race. **Task 13's baseline is 294 (749).**
 
 ---
-
 ## Task 13: Import the existing send log
 
 **Deliverable:** `wa:import-send-log` seeds `wa_contacts` and `wa_messages` from the bench's `send_log.csv`, is dry-run unless `--apply`, and running it twice changes nothing.

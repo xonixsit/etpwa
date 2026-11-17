@@ -8,6 +8,7 @@ use App\Support\WebhookParser;
 use App\Support\WebhookSignature;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
+use Illuminate\Support\Facades\Log;
 
 class WaWebhookController extends Controller
 {
@@ -35,6 +36,8 @@ class WaWebhookController extends Controller
         $secret = (string) config('whatsapp.app_secret', '');
 
         if (! WebhookSignature::isValid($raw, $request->header('X-Hub-Signature-256'), $secret)) {
+            Log::warning('wa webhook: rejected invalid signature');
+
             return response('forbidden', 403);
         }
 

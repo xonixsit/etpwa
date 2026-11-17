@@ -6,6 +6,7 @@ use App\Models\WaContact;
 use App\Models\WaMessage;
 use App\Models\WaWebhookEvent;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Log;
 use Tests\TestCase;
 
 class WebhookIngestTest extends TestCase
@@ -41,6 +42,16 @@ class WebhookIngestTest extends TestCase
 
     public function test_bad_signature_is_403_and_stores_nothing()
     {
+        $raw = file_get_contents(base_path('tests/Fixtures/inbound_text.json'));
+        $this->postCallback($raw, 'sha256='.str_repeat('0', 64))->assertForbidden();
+        $this->assertSame(0, WaWebhookEvent::count());
+    }
+
+    public function test_bad_signature_leaves_a_warning_without_attacker_content()
+    {
+        // Owner decision 2026-11-17: a rejected signature must leave a trace. The exact-string
+        // with() is the content guard -- any context array carrying the body fails the match.
+        Log::shouldReceive('warning')->once()->with('wa webhook: rejected invalid signature');
         $raw = file_get_contents(base_path('tests/Fixtures/inbound_text.json'));
         $this->postCallback($raw, 'sha256='.str_repeat('0', 64))->assertForbidden();
         $this->assertSame(0, WaWebhookEvent::count());

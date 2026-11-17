@@ -15,7 +15,7 @@ class WebhookParserTest extends TestCase
     private function fixture(string $name): array
     {
         return json_decode(
-            file_get_contents(base_path('tests/Fixtures/' . $name)), true);
+            file_get_contents(base_path('tests/Fixtures/'.$name)), true);
     }
 
     private function bodyOf(array $value): array

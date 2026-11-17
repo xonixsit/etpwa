@@ -26,9 +26,9 @@ class InboxViewTest extends TestCase
     public function test_list_shows_name_number_and_state()
     {
         $talking = WaContact::factory()->create(['phone' => '18479043315', 'profile_name' => 'Jane Tester',
-                                                 'last_inbound_at' => now()]);
+            'last_inbound_at' => now()]);
         WaMessage::factory()->create(['wa_contact_id' => $talking->id, 'direction' => WaMessage::IN,
-                                      'sent_at' => now(), 'body' => 'hello']);
+            'sent_at' => now(), 'body' => 'hello']);
         WaContact::factory()->create(['phone' => '15550002222', 'profile_name' => 'Silent Sam'])->optOut('manual');
 
         $this->get('/inbox')->assertOk()
@@ -50,22 +50,22 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '18479043315', 'profile_name' => 'Jane Tester']);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
-                                      'meta_id' => 'wamid.I1', 'body' => 'Is this E Tax Planner?',
-                                      'sent_at' => now()->subMinutes(30)]);
+            'meta_id' => 'wamid.I1', 'body' => 'Is this E Tax Planner?',
+            'sent_at' => now()->subMinutes(30)]);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'meta_id' => 'wamid.O1', 'type' => 'template',
-                                      'template_name' => 'etp_opener_brand', 'template_lang' => 'en',
-                                      'body' => 'Hi Jane, ...', 'status' => WaMessage::DELIVERED,
-                                      'auto_reply' => false, 'sent_at' => now()->subHour()]);
+            'meta_id' => 'wamid.O1', 'type' => 'template',
+            'template_name' => 'etp_opener_brand', 'template_lang' => 'en',
+            'body' => 'Hi Jane, ...', 'status' => WaMessage::DELIVERED,
+            'auto_reply' => false, 'sent_at' => now()->subHour()]);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'meta_id' => 'wamid.O2', 'auto_reply' => true, 'status' => WaMessage::SENT,
-                                      'body' => 'Thanks, a human will reply.', 'sent_at' => now()->subMinutes(20)]);
+            'meta_id' => 'wamid.O2', 'auto_reply' => true, 'status' => WaMessage::SENT,
+            'body' => 'Thanks, a human will reply.', 'sent_at' => now()->subMinutes(20)]);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'meta_id' => null, 'status' => WaMessage::FAILED,
-                                      'error_code' => '131030', 'error_title' => 'Re-engagement message',
-                                      'body' => 'late note', 'sent_at' => now()->subMinute()]);
+            'meta_id' => null, 'status' => WaMessage::FAILED,
+            'error_code' => '131030', 'error_title' => 'Re-engagement message',
+            'body' => 'late note', 'sent_at' => now()->subMinute()]);
 
-        $this->get('/inbox/' . $c->id)->assertOk()
+        $this->get('/inbox/'.$c->id)->assertOk()
             ->assertSee('Is this E Tax Planner?')
             ->assertSee('Jane Tester')
             ->assertSee('delivered')
@@ -80,7 +80,7 @@ class InboxViewTest extends TestCase
         $c = WaContact::factory()->create(['phone' => '18479043315']);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'type' => 'image', 'body' => null]);
 
-        $this->get('/inbox/' . $c->id)->assertOk()
+        $this->get('/inbox/'.$c->id)->assertOk()
             ->assertSee('(image message - text not stored here)');
     }
 
@@ -94,12 +94,12 @@ class InboxViewTest extends TestCase
     public function test_list_shows_window_state_three_ways_and_prefers_opted_out()
     {
         WaContact::factory()->create(['phone' => '15550001111', 'profile_name' => 'Win Open',
-                                      'last_inbound_at' => now()]);
+            'last_inbound_at' => now()]);
         WaContact::factory()->create(['phone' => '15550002222', 'profile_name' => 'Window Stale',
-                                      'last_inbound_at' => now()->subHours(25)]);
+            'last_inbound_at' => now()->subHours(25)]);
         WaContact::factory()->create(['phone' => '15550003333', 'profile_name' => 'Never One']);
         WaContact::factory()->create(['phone' => '15550004444', 'profile_name' => 'Both States',
-                                      'last_inbound_at' => now()])->optOut('manual');
+            'last_inbound_at' => now()])->optOut('manual');
 
         $content = $this->get('/inbox')->assertOk()->getContent();
 
@@ -134,7 +134,7 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15550202020']);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertSame(4, substr_count($content, 'name="_token"'));
     }
@@ -143,18 +143,18 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15550303030', 'profile_name' => 'Sided']);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
-                                      'meta_id' => 'wamid.S1', 'sent_at' => now()->subMinutes(30)]);
+            'meta_id' => 'wamid.S1', 'sent_at' => now()->subMinutes(30)]);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'meta_id' => 'wamid.S2', 'sent_at' => now()->subHour()]);
+            'meta_id' => 'wamid.S2', 'sent_at' => now()->subHour()]);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'meta_id' => 'wamid.S3', 'auto_reply' => true,
-                                      'sent_at' => now()->subMinutes(20)]);
+            'meta_id' => 'wamid.S3', 'auto_reply' => true,
+            'sent_at' => now()->subMinutes(20)]);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'meta_id' => null, 'status' => WaMessage::FAILED,
-                                      'error_code' => '131030', 'error_title' => 'Re-engagement message',
-                                      'sent_at' => now()->subMinute()]);
+            'meta_id' => null, 'status' => WaMessage::FAILED,
+            'error_code' => '131030', 'error_title' => 'Re-engagement message',
+            'sent_at' => now()->subMinute()]);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertSame(1, substr_count($content, 'class="bubble in"'));
         $this->assertSame(3, substr_count($content, 'class="bubble out"'));
@@ -166,9 +166,9 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15550404040']);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'status' => WaMessage::SENT, 'auto_reply' => false]);
+            'status' => WaMessage::SENT, 'auto_reply' => false]);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertStringNotContainsString('FAILED', $content);
     }
@@ -177,10 +177,10 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15550505050']);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'type' => 'template', 'template_name' => 'etp_opener_brand',
-                                      'template_lang' => 'en', 'status' => WaMessage::DELIVERED]);
+            'type' => 'template', 'template_name' => 'etp_opener_brand',
+            'template_lang' => 'en', 'status' => WaMessage::DELIVERED]);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertStringContainsString('etp_opener_brand (en)', $content);
     }
@@ -190,7 +190,7 @@ class InboxViewTest extends TestCase
         $c = WaContact::factory()->create(['phone' => '15550606060']);
         $c->optOut('manual');
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertStringContainsString('OPTED OUT (manual', $content);
     }
@@ -200,8 +200,8 @@ class InboxViewTest extends TestCase
         $open = WaContact::factory()->create(['phone' => '15550707070', 'last_inbound_at' => now()]);
         $closed = WaContact::factory()->create(['phone' => '15550707071', 'last_inbound_at' => now()->subHours(25)]);
 
-        $this->get('/inbox/' . $open->id)->assertOk()->assertSee('reply window open');
-        $this->get('/inbox/' . $closed->id)->assertOk()
+        $this->get('/inbox/'.$open->id)->assertOk()->assertSee('reply window open');
+        $this->get('/inbox/'.$closed->id)->assertOk()
             ->assertSee('reply window closed - approved template required');
     }
 
@@ -213,7 +213,7 @@ class InboxViewTest extends TestCase
         try {
             $c = WaContact::factory()->create(['phone' => '15550808080']);
 
-            $this->get('/inbox/' . $c->id)->assertOk()
+            $this->get('/inbox/'.$c->id)->assertOk()
                 ->assertSee('<option value="etp_probe_a">', false)
                 ->assertSee('<option value="etp_probe_b">', false);
         } finally {
@@ -250,15 +250,15 @@ class InboxViewTest extends TestCase
     {
         $senior = WaContact::factory()->create(['profile_name' => 'Senior Id', 'last_inbound_at' => now()]);
         $junior = WaContact::factory()->create(['profile_name' => 'Junior Id',
-                                                'last_inbound_at' => now()->subHours(10)]);
+            'last_inbound_at' => now()->subHours(10)]);
         $this->assertLessThan($junior->id, $senior->id);
 
         $content = $this->get('/inbox')->assertOk()->getContent();
 
         // PHPUnit's assertLessThan($limit, $actual): the senior (fresher activity, lower id)
         // link must sit at a SMALLER byte offset than the junior one.
-        $this->assertLessThan(strpos($content, 'href="/inbox/' . $junior->id),
-                              strpos($content, 'href="/inbox/' . $senior->id));
+        $this->assertLessThan(strpos($content, 'href="/inbox/'.$junior->id),
+            strpos($content, 'href="/inbox/'.$senior->id));
     }
 
     public function test_list_breaks_an_activity_tie_by_descending_id()
@@ -269,8 +269,8 @@ class InboxViewTest extends TestCase
 
         $content = $this->get('/inbox')->assertOk()->getContent();
 
-        $this->assertLessThan(strpos($content, 'href="/inbox/' . $low->id),
-                              strpos($content, 'href="/inbox/' . $high->id));
+        $this->assertLessThan(strpos($content, 'href="/inbox/'.$low->id),
+            strpos($content, 'href="/inbox/'.$high->id));
     }
 
     public function test_a_blank_query_lists_everyone_like_no_query_at_all()
@@ -305,7 +305,7 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15551010101']);
 
-        $this->get('/inbox/' . $c->id)->assertOk()->assertSee('Nothing here yet.');
+        $this->get('/inbox/'.$c->id)->assertOk()->assertSee('Nothing here yet.');
     }
 
     public function test_the_two_inbox_route_names_the_fence_promises_exist()
@@ -317,7 +317,7 @@ class InboxViewTest extends TestCase
     public function test_list_shows_a_relative_time_for_the_last_inbound()
     {
         WaContact::factory()->create(['phone' => '15551111111', 'profile_name' => 'Two Days',
-                                      'last_inbound_at' => now()->subDays(2)->subMinutes(1)]);
+            'last_inbound_at' => now()->subDays(2)->subMinutes(1)]);
 
         $content = $this->get('/inbox')->assertOk()->getContent();
 
@@ -336,7 +336,7 @@ class InboxViewTest extends TestCase
         ]));
 
         $this->withSession(['errors' => $bag, '_old_input' => ['body' => 'etp old reply text']])
-            ->get('/inbox/' . $c->id)->assertOk()
+            ->get('/inbox/'.$c->id)->assertOk()
             ->assertSee('Reply body cannot be blank.')
             ->assertSee('The 24-hour window is closed.')
             ->assertSee('Pick an approved template.')
@@ -351,7 +351,7 @@ class InboxViewTest extends TestCase
         auth()->logout();
 
         $this->get('/inbox')->assertRedirect('/login');
-        $this->get('/inbox/' . $c->id)->assertRedirect('/login');
+        $this->get('/inbox/'.$c->id)->assertRedirect('/login');
         $this->assertGuest();
     }
 
@@ -359,11 +359,11 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15551112222']);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
-                                      'body' => 'SECOND-MSG', 'sent_at' => now()->subMinutes(10)]);
+            'body' => 'SECOND-MSG', 'sent_at' => now()->subMinutes(10)]);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
-                                      'body' => 'FIRST-MSG', 'sent_at' => now()->subMinutes(30)]);
+            'body' => 'FIRST-MSG', 'sent_at' => now()->subMinutes(30)]);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertLessThan(strpos($content, 'SECOND-MSG'), strpos($content, 'FIRST-MSG'));
     }
@@ -372,9 +372,9 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15552121212']);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
-                                      'body' => '<script>alert(1)</script>']);
+            'body' => '<script>alert(1)</script>']);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertStringContainsString('&lt;script&gt;alert(1)&lt;/script&gt;', $content);
         $this->assertStringNotContainsString('<script>alert(1)', $content);
@@ -384,7 +384,7 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15552222222', 'profile_name' => '<b>XSS Name</b>']);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertStringContainsString('<h2 style="margin:0">&lt;b&gt;XSS Name&lt;/b&gt;', $content);
         $this->assertStringContainsString('value="&lt;b&gt;XSS Name&lt;/b&gt;"', $content);
@@ -404,24 +404,24 @@ class InboxViewTest extends TestCase
     public function test_a_never_replied_contact_sorts_by_its_creation_not_below_active_ones()
     {
         $stale = WaContact::factory()->create(['phone' => '15551919191', 'profile_name' => 'Stale Active',
-                                               'last_inbound_at' => now()->subDays(3)]);
+            'last_inbound_at' => now()->subDays(3)]);
         $freshNull = WaContact::factory()->create(['phone' => '15552020202', 'profile_name' => 'Fresh Never']);
 
         $content = $this->get('/inbox')->assertOk()->getContent();
 
-        $this->assertLessThan(strpos($content, 'href="/inbox/' . $stale->id),
-                              strpos($content, 'href="/inbox/' . $freshNull->id));
+        $this->assertLessThan(strpos($content, 'href="/inbox/'.$stale->id),
+            strpos($content, 'href="/inbox/'.$freshNull->id));
     }
 
     public function test_the_three_thread_forms_post_to_the_task_12_urls()
     {
         $c = WaContact::factory()->create(['phone' => '15551414141']);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
-        $this->assertStringContainsString('action="/inbox/' . $c->id . '/reply"', $content);
-        $this->assertStringContainsString('action="/inbox/' . $c->id . '/template"', $content);
-        $this->assertStringContainsString('action="/inbox/' . $c->id . '/opt-out"', $content);
+        $this->assertStringContainsString('action="/inbox/'.$c->id.'/reply"', $content);
+        $this->assertStringContainsString('action="/inbox/'.$c->id.'/template"', $content);
+        $this->assertStringContainsString('action="/inbox/'.$c->id.'/opt-out"', $content);
     }
 
     public function test_pagination_ends_are_spans_not_empty_links()
@@ -443,9 +443,9 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15551515151']);
         $m = WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::IN,
-                                           'sent_at' => now()->subMinutes(30)]);
+            'sent_at' => now()->subMinutes(30)]);
 
-        $this->get('/inbox/' . $c->id)->assertOk()
+        $this->get('/inbox/'.$c->id)->assertOk()
             ->assertSee($m->sent_at->toDayDateTimeString());
     }
 
@@ -454,7 +454,7 @@ class InboxViewTest extends TestCase
         $c = WaContact::factory()->create(['phone' => '15551616161']);
 
         $content = $this->withSession(['_old_input' => ['body' => '<script>alert(2)</script>']])
-            ->get('/inbox/' . $c->id)->assertOk()->getContent();
+            ->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertStringContainsString('&lt;script&gt;alert(2)&lt;/script&gt;', $content);
         $this->assertStringNotContainsString('<script>alert(2)', $content);
@@ -464,9 +464,9 @@ class InboxViewTest extends TestCase
     {
         $c = WaContact::factory()->create(['phone' => '15551717171']);
         WaMessage::factory()->create(['wa_contact_id' => $c->id, 'direction' => WaMessage::OUT,
-                                      'type' => 'text', 'status' => WaMessage::SENT]);
+            'type' => 'text', 'status' => WaMessage::SENT]);
 
-        $content = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $content = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
 
         $this->assertStringNotContainsString('&middot; template', $content);
     }
@@ -485,7 +485,7 @@ class InboxViewTest extends TestCase
         $list = $this->get('/inbox')->assertOk()->getContent();
         $this->assertSame(2, substr_count($list, '+15551818181')); // link text + Number column
 
-        $thread = $this->get('/inbox/' . $c->id)->assertOk()->getContent();
+        $thread = $this->get('/inbox/'.$c->id)->assertOk()->getContent();
         $this->assertStringContainsString('<h2 style="margin:0">+15551818181', $thread);
     }
 

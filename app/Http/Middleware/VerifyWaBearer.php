@@ -12,7 +12,7 @@ class VerifyWaBearer
         $expected = (string) config('whatsapp.export_token', '');
         $given = (string) $request->bearerToken();
 
-        if ($expected === '' || $given === '' || !hash_equals($expected, $given)) {
+        if ($expected === '' || $given === '' || ! hash_equals($expected, $given)) {
             return response()->json(['message' => 'unauthorized'], 401);
         }
 

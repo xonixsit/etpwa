@@ -28,7 +28,7 @@ class WaCreateUser extends Command
         $user->password = Hash::make($password);
         $user->save();
 
-        $this->info('Staff account ready: ' . $email);
+        $this->info('Staff account ready: '.$email);
 
         return 0;
     }

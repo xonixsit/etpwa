@@ -50,7 +50,7 @@ class AckFlowTest extends TestCase
         // same second. A helper that always stamps now() cannot express that, and now() differs by
         // microseconds between two dispatchSync calls.
         return [
-            'kind' => 'message', 'meta_id' => 'wamid.' . uniqid(), 'phone' => $phone,
+            'kind' => 'message', 'meta_id' => 'wamid.'.uniqid(), 'phone' => $phone,
             'direction' => WaMessage::IN, 'type' => 'text', 'text' => $body,
             'button_id' => null, 'template_name' => null, 'template_lang' => null,
             'sent_at' => $at ?? now(), 'raw' => ['text' => ['body' => $body]],
@@ -257,7 +257,7 @@ class AckFlowTest extends TestCase
         // row the sender records for it (WhatsAppSender.php:99), not an escaping exception. This test does
         // NOT prove atomicity -- see R46 for why no test can, with CACHE_STORE=array.
         $contact = WaContact::factory()->create(['phone' => '18479043315']);
-        Cache::add('wa-ack-' . $contact->id, 1, now()->addHours(24));
+        Cache::add('wa-ack-'.$contact->id, 1, now()->addHours(24));
         ProcessInboundEvent::dispatchSync($this->inbound('hello'));
 
         $this->assertSame(0, WaMessage::where('direction', WaMessage::OUT)->count());

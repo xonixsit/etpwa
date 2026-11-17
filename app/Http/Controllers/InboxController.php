@@ -18,8 +18,8 @@ class InboxController extends Controller
         $contacts = WaContact::query()
             ->when($q !== '', function ($query) use ($q) {
                 $query->where(function ($inner) use ($q) {
-                    $inner->where('phone', 'like', '%' . $q . '%')
-                          ->orWhere('profile_name', 'like', '%' . $q . '%');
+                    $inner->where('phone', 'like', '%'.$q.'%')
+                        ->orWhere('profile_name', 'like', '%'.$q.'%');
                 });
             })
             ->withCount(['messages as inbound_count' => fn ($q2) => $q2->where('direction', WaMessage::IN)])
@@ -45,7 +45,7 @@ class InboxController extends Controller
     {
         $data = $request->validate(['body' => ['required', 'string', 'max:4096']]);
 
-        if (!$contact->windowOpen()) {
+        if (! $contact->windowOpen()) {
             return back()->withInput()->withErrors(['window' => 'The 24-hour reply window is closed. Send an approved template instead.']);
         }
 
@@ -56,7 +56,7 @@ class InboxController extends Controller
         }
 
         return back()->with('result', $message->status === WaMessage::FAILED
-            ? 'Meta refused: ' . $message->error_title
+            ? 'Meta refused: '.$message->error_title
             : 'Sent.');
     }
 
@@ -78,7 +78,7 @@ class InboxController extends Controller
         }
 
         return back()->with('result', $message->status === WaMessage::FAILED
-            ? 'Meta refused (' . $message->error_code . '): ' . $message->error_title
+            ? 'Meta refused ('.$message->error_code.'): '.$message->error_title
             : 'Template sent.');
     }
 

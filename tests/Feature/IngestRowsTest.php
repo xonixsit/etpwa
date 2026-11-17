@@ -21,7 +21,7 @@ class IngestRowsTest extends TestCase
 
     private function items(string $fixture): array
     {
-        $payload = json_decode(file_get_contents(base_path('tests/Fixtures/' . $fixture)), true);
+        $payload = json_decode(file_get_contents(base_path('tests/Fixtures/'.$fixture)), true);
 
         return WebhookParser::parse($payload, '1427706937088002')['items'];
     }
